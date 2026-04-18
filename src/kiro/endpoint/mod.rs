@@ -83,8 +83,9 @@ impl EndpointRegistry {
 /// 上层统一通过 [`KiroEndpoint::build_request`] 构造 `RequestBuilder`，
 /// 由 endpoint 负责根据变体决定 URL / method / body 变换 / header 装饰。
 ///
-/// 注：`stream` 与 `model` 字段在阶段 1 仅占位，Provider 将在阶段 4 读取它们。
-#[allow(dead_code)]
+/// 注：`GenerateAssistant.stream` / `model` 字段当前 IDE 端点未消费，
+/// 保留给未来需要按流式开关或模型做差异化的端点使用。
+#[allow(dead_code)] // `stream` / `model` 字段与 `UsageLimits` 变体暂未被 IDE 端点读取/构造
 pub enum KiroRequest<'a> {
     /// 生成式 Assistant 请求（流式或非流式，视 `stream` 字段）
     GenerateAssistant {
@@ -101,7 +102,6 @@ pub enum KiroRequest<'a> {
 /// Endpoint 层错误语义分类
 ///
 /// Provider 重试循环根据分类决定：禁用凭据 / bail / 瞬态重试 / 强制刷新 token。
-#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EndpointErrorKind {
     /// 402 + 月度配额用尽标记：禁用凭据 + 故障转移
@@ -131,7 +131,6 @@ pub trait KiroEndpoint: Send + Sync {
     /// content-type、Connection、host、user-agent 等端点相关项）。
     ///
     /// 默认实现为 `unimplemented!`，具体端点必须 override。
-    #[allow(dead_code)]
     fn build_request(
         &self,
         _client: &Client,
@@ -144,12 +143,11 @@ pub trait KiroEndpoint: Send + Sync {
     /// 根据上游响应 status + body 分类错误类型
     ///
     /// 默认实现覆盖 IDE 通用语义；有特殊错误格式的端点可 override。
-    #[allow(dead_code)]
     fn classify_error(&self, status: u16, body: &str) -> EndpointErrorKind {
-        if status == 402 && self.is_monthly_request_limit(body) {
+        if status == 402 && default_is_monthly_request_limit(body) {
             return EndpointErrorKind::MonthlyQuotaExhausted;
         }
-        if matches!(status, 401 | 403) && self.is_bearer_token_invalid(body) {
+        if matches!(status, 401 | 403) && default_is_bearer_token_invalid(body) {
             return EndpointErrorKind::BearerTokenInvalid;
         }
         if status == 400 {
@@ -162,39 +160,6 @@ pub trait KiroEndpoint: Send + Sync {
             return EndpointErrorKind::ClientError;
         }
         EndpointErrorKind::Unknown
-    }
-
-    /// API endpoint URL
-    fn api_url(&self, ctx: &RequestContext<'_>) -> String;
-
-    /// MCP endpoint URL
-    fn mcp_url(&self, ctx: &RequestContext<'_>) -> String;
-
-    /// 装饰 API 请求的端点特有 header
-    ///
-    /// Provider 已经设置好 URL、content-type、Connection 和 body；
-    /// 实现负责追加 Authorization、host、user-agent 等端点相关头。
-    fn decorate_api(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder;
-
-    /// 装饰 MCP 请求的端点特有 header
-    fn decorate_mcp(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder;
-
-    /// 对已序列化的 API 请求体做端点特有加工（如注入 profileArn）
-    fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> String;
-
-    /// 对已序列化的 MCP 请求体做端点特有加工（默认不变）
-    fn transform_mcp_body(&self, body: &str, _ctx: &RequestContext<'_>) -> String {
-        body.to_string()
-    }
-
-    /// 判断响应体是否表示"月度配额用尽"（禁用凭据并转移）
-    fn is_monthly_request_limit(&self, body: &str) -> bool {
-        default_is_monthly_request_limit(body)
-    }
-
-    /// 判断响应体是否表示"上游 bearer token 失效"（触发强制刷新）
-    fn is_bearer_token_invalid(&self, body: &str) -> bool {
-        default_is_bearer_token_invalid(body)
     }
 }
 
@@ -280,21 +245,7 @@ mod tests {
         fn name(&self) -> &'static str {
             "probe"
         }
-        fn api_url(&self, _ctx: &RequestContext<'_>) -> String {
-            String::new()
-        }
-        fn mcp_url(&self, _ctx: &RequestContext<'_>) -> String {
-            String::new()
-        }
-        fn decorate_api(&self, req: RequestBuilder, _ctx: &RequestContext<'_>) -> RequestBuilder {
-            req
-        }
-        fn decorate_mcp(&self, req: RequestBuilder, _ctx: &RequestContext<'_>) -> RequestBuilder {
-            req
-        }
-        fn transform_api_body(&self, body: &str, _ctx: &RequestContext<'_>) -> String {
-            body.to_string()
-        }
+        // 不 override build_request，保留默认 unimplemented！（不被本测试模块调用）
     }
 
     #[test]
@@ -395,21 +346,6 @@ mod tests {
     impl KiroEndpoint for NamedProbeEndpoint {
         fn name(&self) -> &'static str {
             self.0
-        }
-        fn api_url(&self, _ctx: &RequestContext<'_>) -> String {
-            String::new()
-        }
-        fn mcp_url(&self, _ctx: &RequestContext<'_>) -> String {
-            String::new()
-        }
-        fn decorate_api(&self, req: RequestBuilder, _ctx: &RequestContext<'_>) -> RequestBuilder {
-            req
-        }
-        fn decorate_mcp(&self, req: RequestBuilder, _ctx: &RequestContext<'_>) -> RequestBuilder {
-            req
-        }
-        fn transform_api_body(&self, body: &str, _ctx: &RequestContext<'_>) -> String {
-            body.to_string()
         }
     }
 
