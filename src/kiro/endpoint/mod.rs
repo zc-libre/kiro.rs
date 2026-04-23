@@ -135,16 +135,12 @@ pub trait KiroEndpoint: Send + Sync {
     ///
     /// 实现负责根据 `req` 变体确定 URL、method、请求体加工、所有 header（包括 Authorization、
     /// content-type、Connection、host、user-agent 等端点相关项）。
-    ///
-    /// 默认实现为 `unimplemented!`，具体端点必须 override。
     fn build_request(
         &self,
-        _client: &Client,
-        _ctx: &RequestContext<'_>,
-        _req: &KiroRequest<'_>,
-    ) -> anyhow::Result<RequestBuilder> {
-        unimplemented!("endpoint {} 未实现 build_request", self.name())
-    }
+        client: &Client,
+        ctx: &RequestContext<'_>,
+        req: &KiroRequest<'_>,
+    ) -> anyhow::Result<RequestBuilder>;
 
     /// 根据上游响应 status + body 分类错误类型
     ///
@@ -247,14 +243,21 @@ mod tests {
         assert!(!default_is_bearer_token_invalid("unrelated error"));
     }
 
-    /// 仅依赖默认实现的探针端点，专门用来覆盖 trait 的默认 `classify_error`
+    /// 仅用于覆盖 trait 默认 `classify_error` 的探针端点
     struct ProbeEndpoint;
 
     impl KiroEndpoint for ProbeEndpoint {
         fn name(&self) -> &'static str {
             "probe"
         }
-        // 不 override build_request，保留默认 unimplemented！（不被本测试模块调用）
+        fn build_request(
+            &self,
+            _client: &Client,
+            _ctx: &RequestContext<'_>,
+            _req: &KiroRequest<'_>,
+        ) -> anyhow::Result<RequestBuilder> {
+            unreachable!("probe endpoint should never build a request")
+        }
     }
 
     #[test]
@@ -376,6 +379,14 @@ mod tests {
     impl KiroEndpoint for NamedProbeEndpoint {
         fn name(&self) -> &'static str {
             self.0
+        }
+        fn build_request(
+            &self,
+            _client: &Client,
+            _ctx: &RequestContext<'_>,
+            _req: &KiroRequest<'_>,
+        ) -> anyhow::Result<RequestBuilder> {
+            unreachable!("named probe endpoint should never build a request")
         }
     }
 

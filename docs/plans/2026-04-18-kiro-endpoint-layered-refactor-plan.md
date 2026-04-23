@@ -543,6 +543,8 @@ async fn call_with_retry(
 - **Verify**: `cargo build` + `cargo clippy -D warnings` + `cargo test`
 - **Complexity**: Small
 
+> **⚠️ 已知遗漏（2026-04-23 code review 发现）**：本步骤删除了旧的多方法接口，但**未同步清理** Step 1.2 为过渡期引入的 `build_request` `unimplemented!()` 默认体。该默认体已完成过渡期使命（阶段 4.1/4.2 切换完成后 `IdeEndpoint` 已完整 override），继续保留会让必填契约伪装成可选覆盖——新端点漏实现时编译期沉默、生产路径 panic。此疏漏在**阶段 6**（follow-up）处理。
+
 #### Step 4.4：阶段 4 验收
 
 - **Verify**:
@@ -609,6 +611,63 @@ async fn call_with_retry(
 
 ---
 
+### 阶段 6：trait 契约硬化（post-refactor follow-up，2026-04-23 追加）
+
+**触发**：code review 发现 Step 4.3 遗漏了 `build_request` 过渡期 `unimplemented!()` 默认体的清理（见 Step 4.3 末尾遗漏注记）。
+
+**目标**：把 `build_request` 从"可选覆盖 + panic 兜底"固化为"必填抽象方法"，让新端点漏实现在 `cargo build` 阶段报错，而非在生产流量到达 `provider.rs:179` / `token_manager.rs:350` 时 panic 崩 worker。
+
+**涉及文件**：
+- `src/kiro/endpoint/mod.rs`（trait 定义 + 测试专用两个 probe）
+
+#### Step 6.1：trait 删除默认体
+
+- **Files**: `src/kiro/endpoint/mod.rs:134-147`
+- **Action**:
+  - 删除 `build_request` 的默认体与 `unimplemented!()`
+  - 方法签名以 `;` 结尾（与 `name()` 一致，成为真正的抽象方法）
+  - 删除"默认实现为 `unimplemented!`，具体端点必须 override"的文档注释（契约已在类型签名上自文档化）
+- **Verify**: `cargo build` — 预期 `IdeEndpoint` 因已完整实现而通过
+- **Complexity**: Trivial
+
+#### Step 6.2：测试 probe 补 stub
+
+- **Files**: `src/kiro/endpoint/mod.rs:253-258`（`ProbeEndpoint`）与 `:376-380`（`NamedProbeEndpoint`）
+- **Action**: 给两个测试 probe 各新增：
+    ```rust
+    fn build_request(
+        &self,
+        _client: &Client,
+        _ctx: &RequestContext<'_>,
+        _req: &KiroRequest<'_>,
+    ) -> anyhow::Result<RequestBuilder> {
+        unreachable!("probe endpoint should never build a request")
+    }
+    ```
+  `unreachable!()` 比 `unimplemented!()` 更准确——表达的是"按测试设计永不应被调用"，而非"暂未实现"。同时删除 `ProbeEndpoint` 内"不 override build_request"的陈旧注释（L257）。
+- **Test cases**：
+  - 现有 15 个单元测试应全绿（probe 走的是 `classify_error` / `Registry` 路径，不触发 `build_request`）
+- **Verify**: `cargo test kiro::endpoint`
+- **Complexity**: Trivial
+
+#### Step 6.3：负向验证（可选手工）
+
+- **Action**: 在本地临时写一个仅实现 `name()` 的空 `impl KiroEndpoint`，确认 `cargo build` 报 `not all trait items implemented: missing`build_request\`\` 后删除临时代码——不提交。
+- **Complexity**: Trivial
+
+#### Step 6.4：阶段 6 验收
+
+- **Verify**:
+  - `cargo clippy --all-targets -- -D warnings`
+  - `cargo test`
+- **回滚**：本阶段为单文件改动，单个 commit，`git revert` 即可；不影响阶段 1-5 的已完成成果。
+
+**Out of Scope（评估后延后）**：
+- **合并 `ProbeEndpoint` / `NamedProbeEndpoint` 为单一 `TestEndpoint`**：独立的测试侧重构，避免本次 PR 范围扩散；若未来 trait 再加方法时再做。
+- **拆分 `build_request` 为模板方法（`url_for` / `decorate_headers` 等）**：YAGNI，当前只有 1 个 endpoint 实现，抽象收益是假想的，复杂度代价是真实的。待第 2 个 endpoint 落地、差异模式清晰后再评估。
+
+---
+
 ## Test Strategy
 
 ### Automated Tests
@@ -661,7 +720,7 @@ async fn call_with_retry(
 
 | Risk | Impact | Mitigation |
 |------|--------|-----------|
-| trait 方法切换漏改调用点 | provider 调用 unimplemented! panic | 阶段 1 `build_request` 默认实现是 `unimplemented!` 但 IDE 已 override；阶段 4.3 删除旧方法前 grep 确认无调用 |
+| trait 方法切换漏改调用点 | provider 调用 unimplemented! panic | 阶段 1 `build_request` 默认实现是 `unimplemented!` 但 IDE 已 override；阶段 4.3 删除旧方法前 grep 确认无调用。**2026-04-23 补注**：该 mitigation 仅覆盖切换期风险，未覆盖"新 endpoint 漏实现"的长期风险——阶段 6 （follow-up）删除默认体引入编译期契约保护。 |
 | CallContext 字段增加破坏 Clone 开销 | 请求延迟微增 | Arc<dyn KiroEndpoint> 与 String 均为廉价 Clone；machine_id 在 token_manager 预计算，provider 仅读取 |
 | get_usage_limits_for 泛化后 URL/header 字节不一致 | 上游 400/401 | 阶段 5.2 使用 wire fixture 比对或手工对比；若无工具则以阶段 4 的请求日志为基线 |
 | AdminService 错误消息格式变化 | 调用方解析失败 | 决策 4 明确消息格式由 admin_service 组装；测试用例验证字节级一致 |
@@ -693,7 +752,8 @@ async fn call_with_retry(
 - [x] Phase 3 complete — `2d7cbfc`
 - [x] Phase 4 complete — `6f13323`（4.1+4.2）/ `d0b77e2`（4.3 独立）
 - [x] Phase 5 complete — `21bfe7a`
-- [x] Implementation complete（隔离 worktree：`.claude/worktrees/agent-af695560`，分支 `worktree-agent-af695560`）
+- [x] Implementation complete（阶段 1-5；隔离 worktree：`.claude/worktrees/agent-af695560`，分支 `worktree-agent-af695560`）
+- [ ] Phase 6 (post-refactor follow-up): trait 契约硬化 — 2026-04-23 code review 追加，详见上方阶段 6
 
 ---
 
@@ -713,6 +773,9 @@ async fn call_with_retry(
           │                      (4.3 必须在 4.1/4.2 手工回归通过后单独 commit)
           ▼
 [阶段 5: 合并重试循环 + get_usage_limits 泛化]
+          │
+          ▼
+[阶段 6: trait 契约硬化（post-refactor follow-up）]
 ```
 
 **关键约束**：
@@ -721,6 +784,7 @@ async fn call_with_retry(
 - 阶段 3 依赖阶段 2（CallContext 需要 registry 预解析）
 - 阶段 4 依赖阶段 1（需要 build_request 实现）+ 阶段 3（需要 ctx.endpoint）
 - 阶段 5 依赖阶段 4（需要 build_request 为唯一路径）
+- **阶段 6 依赖阶段 4.3**（Step 1.2 引入的 `unimplemented!()` 默认体在 4.3 未清理；阶段 6 负责彻底删除）
 
 ## 附录 B：研究文档引用对照
 
