@@ -278,6 +278,37 @@ impl KiroProvider {
                     ));
                     continue;
                 }
+                EndpointErrorKind::Unauthorized => {
+                    // 注：provider 层暂无 mock/集成测试基础设施，此 arm 的端到端
+                    // 行为依赖 endpoint 层 classify_error 测试 + 人工走查覆盖
+                    // （见 docs/plans/2026-04-23-401-403-failover-regression-plan.md Phase 4）
+                    tracing::warn!(
+                        "{}失败（可能为凭据错误，尝试 {}/{}）: {} {}",
+                        kind_label,
+                        attempt + 1,
+                        max_retries,
+                        status,
+                        body
+                    );
+
+                    let has_available = self.token_manager.report_failure(ctx.id);
+                    if !has_available {
+                        anyhow::bail!(
+                            "{}失败（所有凭据已用尽）: {} {}",
+                            kind_label,
+                            status,
+                            body
+                        );
+                    }
+
+                    last_error = Some(anyhow::anyhow!(
+                        "{}失败: {} {}",
+                        kind_label,
+                        status,
+                        body
+                    ));
+                    continue;
+                }
                 EndpointErrorKind::Transient => {
                     tracing::warn!(
                         "{}失败（上游瞬态错误，尝试 {}/{}）: {} {}",

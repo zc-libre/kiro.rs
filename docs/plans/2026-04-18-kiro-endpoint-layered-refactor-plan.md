@@ -167,7 +167,9 @@ impl EndpointRegistry {
 1. **重试次数计算**：完全一致（`min(total × 3, 9)`）
 2. **force_refreshed Set 语义**：完全一致
 3. **成功/失败上报**：`report_success` / `report_failure` / `report_quota_exhausted` 完全一致
-4. **错误分支顺序**：402 → 400 → 401/403 → 瞬态 → 其他 4xx → 兜底，顺序一致
+4. **错误分支顺序（重构前）**：402 → 400 → 401/403 → 瞬态 → 其他 4xx → 兜底，两循环顺序一致。
+   重构后枚举化为：MonthlyQuotaExhausted → BadRequest → BearerTokenInvalid → Unauthorized → Transient → ClientError → Unknown。
+   注意：原"401/403"分支在枚举化时曾被拆分导致无标记 401/403 落入 ClientError 回归（见研究报告 2026-04-23），已通过新增 Unauthorized 变体修复。
 5. **sleep 时机**：完全一致
 6. **client_for 调用**：两者均通过 `self.client_for(&ctx.credentials)?` 取 client
 

@@ -108,6 +108,12 @@ pub enum EndpointErrorKind {
     MonthlyQuotaExhausted,
     /// 401/403 + bearer token 失效标记：强制刷新 token（每凭据一次机会）
     BearerTokenInvalid,
+    /// 401/403 无 bearer 失效标记：凭据/权限问题（如 IAM 拒绝、profile_arn
+    /// 授权不足、订阅不匹配等）。计入 `report_failure`（累计达阈值禁用凭据），
+    /// 然后故障转移到下一个可用凭据。与 `BearerTokenInvalid` 的区别：
+    /// 后者是 token 本身失效（可尝试 force_refresh 恢复），前者是凭据
+    /// 无法获得对应资源的访问权限（刷新 token 无意义）。
+    Unauthorized,
     /// 400 Bad Request：直接 bail，不重试、不计入失败
     BadRequest,
     /// 其他未分类 4xx（经 401/402/403 特殊分支处理后的剩余 4xx）：bail
@@ -149,6 +155,9 @@ pub trait KiroEndpoint: Send + Sync {
         }
         if matches!(status, 401 | 403) && default_is_bearer_token_invalid(body) {
             return EndpointErrorKind::BearerTokenInvalid;
+        }
+        if matches!(status, 401 | 403) {
+            return EndpointErrorKind::Unauthorized;
         }
         if status == 400 {
             return EndpointErrorKind::BadRequest;
@@ -316,12 +325,33 @@ mod tests {
     }
 
     #[test]
-    fn test_classify_error_401_without_marker_is_client_error() {
-        // 401 但 body 不含 bearer 失效标记 → 走普通 4xx arm
+    fn test_classify_error_401_without_marker_is_unauthorized() {
+        // 401 但 body 不含 bearer 失效标记 → 凭据/权限问题，走 Unauthorized（触发 report_failure）
         let probe = ProbeEndpoint;
         assert_eq!(
             probe.classify_error(401, "{}"),
-            EndpointErrorKind::ClientError
+            EndpointErrorKind::Unauthorized
+        );
+    }
+
+    #[test]
+    fn test_classify_error_403_without_marker_is_unauthorized() {
+        // 403 但 body 不含 bearer 失效标记 → 凭据/权限问题，走 Unauthorized（触发 report_failure）
+        let probe = ProbeEndpoint;
+        assert_eq!(
+            probe.classify_error(403, "{}"),
+            EndpointErrorKind::Unauthorized
+        );
+    }
+
+    #[test]
+    fn test_classify_error_401_with_iam_body_is_unauthorized() {
+        // body 有业务错误消息但不含 bearer 失效标记 → 仍走 Unauthorized
+        let probe = ProbeEndpoint;
+        let body = r#"{"message":"User is not authorized to perform this action"}"#;
+        assert_eq!(
+            probe.classify_error(401, body),
+            EndpointErrorKind::Unauthorized
         );
     }
 
@@ -420,6 +450,7 @@ mod tests {
     fn test_endpoint_error_kind_debug() {
         assert!(format!("{:?}", EndpointErrorKind::MonthlyQuotaExhausted).contains("Monthly"));
         assert!(format!("{:?}", EndpointErrorKind::BearerTokenInvalid).contains("Bearer"));
+        assert!(format!("{:?}", EndpointErrorKind::Unauthorized).contains("Unauthorized"));
         assert!(format!("{:?}", EndpointErrorKind::BadRequest).contains("Bad"));
         assert!(format!("{:?}", EndpointErrorKind::ClientError).contains("Client"));
         assert!(format!("{:?}", EndpointErrorKind::Transient).contains("Transient"));
