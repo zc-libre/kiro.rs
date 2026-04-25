@@ -1018,7 +1018,7 @@ src/
 - [x] Plan approved
 - [x] Implementation started
 - [x] Phase 0 complete (准备)
-- [ ] Phase 1 complete (基建)
+- [x] Phase 1 complete (基建)
 - [ ] Phase 2 complete (基础设施 + 拆 token_manager)
 - [ ] Phase 3 complete (KiroClient)
 - [ ] Phase 4 complete (Conversation 协议)
