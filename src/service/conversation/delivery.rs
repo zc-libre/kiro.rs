@@ -3,7 +3,7 @@
 //! 当前实现委托给 [`super::stream::StreamContext`] 与 [`super::stream::BufferedStreamContext`]。
 //! Phase 4 不重写 1989 行 stream.rs；Phase 7 优化时可把这两个 Context 拆为独立 trait 实现。
 
-#![allow(dead_code)]
+#![allow(dead_code, unused_imports)]
 
 pub use super::stream::{BufferedStreamContext as BufferedDelivery, StreamContext as LiveDelivery};
 

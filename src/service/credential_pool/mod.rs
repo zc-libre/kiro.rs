@@ -4,12 +4,14 @@
 
 #![allow(dead_code)]
 
+pub mod admin;
 pub mod pool;
 pub mod state;
 pub mod stats;
 pub mod store;
 
-pub use pool::{CallContext, CredentialPool, MODE_BALANCED, MODE_PRIORITY};
-pub use state::{CredentialState, EntryState, MAX_FAILURES_PER_CREDENTIAL};
+pub use admin::AdminPoolError;
+pub use pool::{CallContext, CredentialPool};
+pub use state::CredentialState;
 pub use stats::{CredentialStats, EntryStats};
-pub use store::{CredentialStore, ValidationIssue, ValidationKind};
+pub use store::CredentialStore;

@@ -1,35 +1,53 @@
-mod admin;
-mod admin_ui;
-mod anthropic;
-mod common;
 mod config;
 mod domain;
-mod error;
-mod http_client;
 mod infra;
 mod interface;
-mod kiro;
-mod model;
 mod service;
-pub mod token;
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use clap::Parser;
-use kiro::endpoint::{IdeEndpoint, KiroEndpoint};
-use kiro::model::credentials::{CredentialsConfig, KiroCredentials};
-use kiro::provider::KiroProvider;
-use kiro::token_manager::MultiTokenManager;
-use model::arg::Args;
-use model::config::Config;
+
+use crate::config::Config;
+use crate::domain::credential::Credential;
+use crate::domain::endpoint::KiroEndpoint;
+use crate::domain::retry::RetryPolicy;
+use crate::infra::endpoint::{EndpointRegistry, IdeEndpoint};
+use crate::infra::http::client::ProxyConfig;
+use crate::infra::http::executor::RequestExecutor;
+use crate::infra::http::retry::DefaultRetryPolicy;
+use crate::infra::machine_id::MachineIdResolver;
+use crate::infra::storage::{BalanceCacheStore, CredentialsFileStore, StatsFileStore};
+use crate::interface::http::admin as http_admin;
+use crate::interface::http::anthropic as http_anthropic;
+use crate::interface::http::ui as http_ui;
+use crate::service::admin::AdminService;
+use crate::service::credential_pool::{
+    CredentialPool, CredentialState, CredentialStats, CredentialStore, EntryStats,
+};
+use crate::service::KiroClient;
+
+const DEFAULT_CREDENTIALS_PATH: &str = "credentials.json";
+
+/// Anthropic <-> Kiro API 客户端
+#[derive(Parser, Debug)]
+#[command(version, about, long_about = None)]
+struct Args {
+    /// 配置文件路径
+    #[arg(short, long)]
+    config: Option<String>,
+
+    /// 凭证文件路径
+    #[arg(long)]
+    credentials: Option<String>,
+}
 
 #[tokio::main]
 async fn main() {
-    // 解析命令行参数
     let args = Args::parse();
 
-    // 初始化日志
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -37,185 +55,218 @@ async fn main() {
         )
         .init();
 
-    // 加载配置
-    let config_path = args
+    // ====== 加载配置 ======
+    let config_path: PathBuf = args
         .config
-        .unwrap_or_else(|| Config::default_config_path().to_string());
+        .unwrap_or_else(|| Config::default_config_path().to_string())
+        .into();
     let config = Config::load(&config_path).unwrap_or_else(|e| {
         tracing::error!("加载配置失败: {}", e);
         std::process::exit(1);
     });
+    let config = Arc::new(config);
 
-    // 加载凭证（支持单对象或数组格式）
-    let credentials_path = args
+    // ====== 加载凭据 ======
+    let credentials_path: PathBuf = args
         .credentials
-        .unwrap_or_else(|| KiroCredentials::default_credentials_path().to_string());
-    let credentials_config = CredentialsConfig::load(&credentials_path).unwrap_or_else(|e| {
-        tracing::error!("加载凭证失败: {}", e);
-        std::process::exit(1);
-    });
+        .unwrap_or_else(|| DEFAULT_CREDENTIALS_PATH.to_string())
+        .into();
+    let file_store = Arc::new(CredentialsFileStore::new(Some(credentials_path.clone())));
+    let resolver = Arc::new(MachineIdResolver::new());
 
-    // 判断是否为多凭据格式（用于刷新后回写）
-    let is_multiple_format = credentials_config.is_multiple();
+    let (cred_store, validation_issues) =
+        CredentialStore::load(file_store, config.clone(), resolver.clone()).unwrap_or_else(|e| {
+            tracing::error!("加载凭证失败: {}", e);
+            std::process::exit(1);
+        });
+    let cred_store = Arc::new(cred_store);
 
-    // 转换为按优先级排序的凭据列表
-    let mut credentials_list = credentials_config.into_sorted_credentials();
+    // 校验问题日志输出
+    for issue in &validation_issues {
+        tracing::warn!("凭据装载校验问题: {}", issue.message);
+    }
 
-    // 检查 KIRO_API_KEY 环境变量，自动创建 API Key 凭据
+    // ====== 加载 stats（与 credentials.json 同目录的 kiro_stats.json）======
+    let stats_path = credentials_path
+        .parent()
+        .map(|dir| dir.join("kiro_stats.json"));
+    let stats_file = Arc::new(StatsFileStore::new(stats_path));
+    let initial_stats: HashMap<u64, EntryStats> = stats_file
+        .load()
+        .into_iter()
+        .map(|(id, e)| (id, EntryStats::from_storage(e)))
+        .collect();
+
+    let cred_state = Arc::new(CredentialState::new());
+    let cred_stats = Arc::new(CredentialStats::new());
+
+    // ====== 构建 CredentialPool ======
+    let pool = Arc::new(CredentialPool::new(
+        cred_store.clone(),
+        cred_state.clone(),
+        cred_stats.clone(),
+        Some(stats_file.clone()),
+        config.clone(),
+        resolver.clone(),
+    ));
+
+    // 装载初始 state（disabled + invalid_config）
+    let invalid_config_ids: HashSet<u64> = validation_issues.iter().map(|i| i.id).collect();
+    let initial_disabled_ids: HashSet<u64> = cred_store
+        .snapshot()
+        .iter()
+        .filter(|(_, c)| c.disabled)
+        .map(|(id, _)| *id)
+        .collect();
+    pool.install_initial_states(&invalid_config_ids, &initial_disabled_ids);
+    pool.install_initial_stats(initial_stats);
+
+    // ====== 处理 KIRO_API_KEY 环境变量 ======
     if let Ok(kiro_api_key) = std::env::var("KIRO_API_KEY") {
         if kiro_api_key.is_empty() {
             tracing::warn!("KIRO_API_KEY 环境变量已设置但为空，视为未配置");
         } else {
             tracing::info!("检测到 KIRO_API_KEY 环境变量，添加 API Key 凭据（最高优先级）");
-            let api_key_cred = KiroCredentials {
+            let api_key_cred = Credential {
                 kiro_api_key: Some(kiro_api_key),
                 auth_method: Some("api_key".to_string()),
                 priority: 0,
                 ..Default::default()
             };
-            credentials_list.insert(0, api_key_cred);
+            if let Err(e) = pool.add_credential(api_key_cred).await {
+                tracing::warn!("添加 KIRO_API_KEY 凭据失败: {}", e);
+            }
         }
     }
 
-    tracing::info!("已加载 {} 个凭据配置", credentials_list.len());
+    tracing::info!("已加载 {} 个凭据配置", pool.total_count());
 
-    // 获取第一个凭据用于日志显示
-    let first_credentials = credentials_list.first().cloned().unwrap_or_default();
-    tracing::debug!("主凭证: {:?}", first_credentials);
-
-    // 获取 API Key
+    // ====== API Key 鉴权 ======
     let api_key = config.api_key.clone().unwrap_or_else(|| {
         tracing::error!("配置文件中未设置 apiKey");
         std::process::exit(1);
     });
 
-    // 构建代理配置
-    let proxy_config = config.proxy_url.as_ref().map(|url| {
-        let mut proxy = http_client::ProxyConfig::new(url);
-        if let (Some(username), Some(password)) = (&config.proxy_username, &config.proxy_password) {
-            proxy = proxy.with_auth(username, password);
+    // ====== 全局代理配置 ======
+    let global_proxy = config.proxy.proxy_url.as_deref().map(|url| {
+        let mut p = ProxyConfig::new(url);
+        if let (Some(u), Some(pw)) = (
+            &config.proxy.proxy_username,
+            &config.proxy.proxy_password,
+        ) {
+            p = p.with_auth(u, pw);
         }
-        proxy
+        p
     });
-
-    if proxy_config.is_some() {
-        tracing::info!("已配置 HTTP 代理: {}", config.proxy_url.as_ref().unwrap());
+    if let Some(p) = &global_proxy {
+        tracing::info!("已配置 HTTP 代理: {}", p.url);
     }
 
-    // 构建端点注册表
-    let mut endpoints: HashMap<String, Arc<dyn KiroEndpoint>> = HashMap::new();
+    // ====== 端点注册表 ======
+    let mut endpoints_map: HashMap<String, Arc<dyn KiroEndpoint>> = HashMap::new();
     {
         let ide = IdeEndpoint::new();
-        endpoints.insert(ide.name().to_string(), Arc::new(ide));
+        endpoints_map.insert(ide.name().to_string(), Arc::new(ide));
     }
-
-    // 校验默认端点存在
-    if !endpoints.contains_key(&config.default_endpoint) {
-        tracing::error!("默认端点 \"{}\" 未注册", config.default_endpoint);
-        std::process::exit(1);
-    }
+    let endpoints = match EndpointRegistry::new(&config.endpoint.default_endpoint, endpoints_map) {
+        Ok(reg) => Arc::new(reg),
+        Err(e) => {
+            tracing::error!("构建端点注册表失败: {}", e);
+            std::process::exit(1);
+        }
+    };
 
     // 校验所有凭据声明的端点都已注册
-    for cred in &credentials_list {
+    for (id, cred) in cred_store.snapshot() {
         let name = cred
             .endpoint
             .as_deref()
-            .unwrap_or(&config.default_endpoint);
-        if !endpoints.contains_key(name) {
+            .unwrap_or(&config.endpoint.default_endpoint);
+        if !endpoints.contains(name) {
             tracing::error!(
-                "凭据 id={:?} 指定了未知端点 \"{}\"（已注册: {:?}）",
-                cred.id,
+                "凭据 #{} 指定了未知端点 \"{}\"（已注册: {:?}）",
+                id,
                 name,
-                endpoints.keys().collect::<Vec<_>>()
+                endpoints.names()
             );
             std::process::exit(1);
         }
     }
 
-    let endpoint_names: Vec<String> = endpoints.keys().cloned().collect();
+    let endpoint_names: Vec<String> = endpoints.names();
 
-    // 创建 MultiTokenManager 和 KiroProvider
-    let token_manager = MultiTokenManager::new(
-        config.clone(),
-        credentials_list,
-        proxy_config.clone(),
-        Some(credentials_path.into()),
-        is_multiple_format,
-    )
-    .unwrap_or_else(|e| {
-        tracing::error!("创建 Token 管理器失败: {}", e);
-        std::process::exit(1);
-    });
-    let token_manager = Arc::new(token_manager);
-    let kiro_provider = KiroProvider::with_proxy(
-        token_manager.clone(),
-        proxy_config.clone(),
-        endpoints,
-        config.default_endpoint.clone(),
-    );
+    // ====== KiroClient ======
+    let executor = Arc::new(RequestExecutor::new(config.clone(), global_proxy.clone()));
+    let policy: Arc<dyn RetryPolicy> = Arc::new(DefaultRetryPolicy::new());
+    let kiro_client = Arc::new(KiroClient::new(
+        executor,
+        pool.clone(),
+        endpoints.clone(),
+        policy,
+    ));
 
-    // 初始化 count_tokens 配置
-    token::init_config(token::CountTokensConfig {
-        api_url: config.count_tokens_api_url.clone(),
-        api_key: config.count_tokens_api_key.clone(),
-        auth_type: config.count_tokens_auth_type.clone(),
-        proxy: proxy_config,
-        tls_backend: config.tls_backend,
-    });
-
-    // 构建 Anthropic API 路由（profile_arn 由 provider 层根据实际凭据动态注入）
-    let anthropic_app = anthropic::create_router_with_provider(
+    // ====== Anthropic 路由 ======
+    let anthropic_app = http_anthropic::create_router(
         &api_key,
-        Some(kiro_provider),
-        config.extract_thinking,
+        Some(kiro_client),
+        config.features.extract_thinking,
     );
 
-    // 构建 Admin API 路由（如果配置了非空的 admin_api_key）
-    // 安全检查：空字符串被视为未配置，防止空 key 绕过认证
+    // ====== Admin 路由（如配置 admin_api_key）======
     let admin_key_valid = config
+        .admin
         .admin_api_key
-        .as_ref()
+        .as_deref()
         .map(|k| !k.trim().is_empty())
         .unwrap_or(false);
 
-    let app = if let Some(admin_key) = &config.admin_api_key {
+    let app = if let Some(admin_key) = config.admin.admin_api_key.as_deref() {
         if admin_key.trim().is_empty() {
-            tracing::warn!("admin_api_key 配置为空，Admin API 未启用");
+            tracing::warn!("adminApiKey 配置为空，Admin API 未启用");
             anthropic_app
         } else {
+            // BalanceCacheStore 路径：与 credentials.json 同目录
+            let cache_path = credentials_path
+                .parent()
+                .map(|d| d.join("kiro_balance_cache.json"));
+            let balance_cache = Arc::new(BalanceCacheStore::new(cache_path));
             let admin_service =
-                admin::AdminService::new(token_manager.clone(), endpoint_names.clone());
-            let admin_state = admin::AdminState::new(admin_key, admin_service);
-            let admin_app = admin::create_admin_router(admin_state);
-
-            // 创建 Admin UI 路由
-            let admin_ui_app = admin_ui::create_admin_ui_router();
-
+                AdminService::new(pool.clone(), balance_cache, endpoint_names.clone());
+            let admin_state = http_admin::AdminState::new(admin_key, admin_service);
+            let admin_app = http_admin::create_admin_router(admin_state);
+            let ui_app = http_ui::create_admin_ui_router();
             tracing::info!("Admin API 已启用");
             tracing::info!("Admin UI 已启用: /admin");
             anthropic_app
                 .nest("/api/admin", admin_app)
-                .nest("/admin", admin_ui_app)
+                .nest("/admin", ui_app)
         }
     } else {
         anthropic_app
     };
 
-    // 启动服务器
-    let addr = format!("{}:{}", config.host, config.port);
+    // ====== 启动 HTTP ======
+    let addr = format!("{}:{}", config.net.host, config.net.port);
     tracing::info!("启动 Anthropic API 端点: {}", addr);
     tracing::info!("API Key: {}***", &api_key[..(api_key.len() / 2)]);
     tracing::info!("可用 API:");
     tracing::info!("  GET  /v1/models");
     tracing::info!("  POST /v1/messages");
     tracing::info!("  POST /v1/messages/count_tokens");
+    tracing::info!("  POST /cc/v1/messages");
+    tracing::info!("  POST /cc/v1/messages/count_tokens");
     if admin_key_valid {
         tracing::info!("Admin API:");
-        tracing::info!("  GET  /api/admin/credentials");
-        tracing::info!("  POST /api/admin/credentials/:index/disabled");
-        tracing::info!("  POST /api/admin/credentials/:index/priority");
-        tracing::info!("  POST /api/admin/credentials/:index/reset");
-        tracing::info!("  GET  /api/admin/credentials/:index/balance");
+        tracing::info!("  GET    /api/admin/credentials");
+        tracing::info!("  POST   /api/admin/credentials");
+        tracing::info!("  DELETE /api/admin/credentials/:id");
+        tracing::info!("  POST   /api/admin/credentials/:id/disabled");
+        tracing::info!("  POST   /api/admin/credentials/:id/priority");
+        tracing::info!("  POST   /api/admin/credentials/:id/reset");
+        tracing::info!("  POST   /api/admin/credentials/:id/refresh");
+        tracing::info!("  GET    /api/admin/credentials/:id/balance");
+        tracing::info!("  GET    /api/admin/config/load-balancing");
+        tracing::info!("  PUT    /api/admin/config/load-balancing");
         tracing::info!("Admin UI:");
         tracing::info!("  GET  /admin");
     }

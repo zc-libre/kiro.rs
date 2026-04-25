@@ -6,6 +6,6 @@ pub mod balance_cache;
 pub mod credentials_file;
 pub mod stats_file;
 
-pub use balance_cache::{BalanceCacheStore, CachedBalanceEntry};
+pub use balance_cache::BalanceCacheStore;
 pub use credentials_file::CredentialsFileStore;
 pub use stats_file::{StatsEntry, StatsFileStore};

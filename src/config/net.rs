@@ -4,16 +4,13 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
+#[derive(Default)]
 pub enum TlsBackend {
+    #[default]
     Rustls,
     NativeTls,
 }
 
-impl Default for TlsBackend {
-    fn default() -> Self {
-        Self::Rustls
-    }
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

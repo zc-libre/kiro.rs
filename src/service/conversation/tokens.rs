@@ -27,7 +27,8 @@ pub fn count_tokens(text: &str) -> u64 {
         .map(|c| if is_non_western_char(c) { 4.0 } else { 1.0 })
         .sum();
     let tokens = char_units / 4.0;
-    let acc_token = if tokens < 100.0 {
+    
+    (if tokens < 100.0 {
         tokens * 1.5
     } else if tokens < 200.0 {
         tokens * 1.3
@@ -37,8 +38,7 @@ pub fn count_tokens(text: &str) -> u64 {
         tokens * 1.2
     } else {
         tokens * 1.0
-    } as u64;
-    acc_token
+    } as u64)
 }
 
 /// 估算请求的输入 tokens（async 包装；内部纯计算，未来可切 spawn_blocking）
@@ -88,12 +88,11 @@ pub fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
         if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
             total += count_tokens(text) as i32;
         }
-        if block.get("type").and_then(|v| v.as_str()) == Some("tool_use") {
-            if let Some(input) = block.get("input") {
+        if block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
+            && let Some(input) = block.get("input") {
                 let input_str = serde_json::to_string(input).unwrap_or_default();
                 total += count_tokens(&input_str) as i32;
             }
-        }
     }
     total.max(1)
 }

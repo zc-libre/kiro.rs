@@ -514,7 +514,7 @@ async fn handle_non_stream_request(
                             // 累积工具的 JSON 输入
                             let buffer = tool_json_buffers
                                 .entry(tool_use.tool_use_id.clone())
-                                .or_insert_with(String::new);
+                                .or_default();
                             buffer.push_str(&tool_use.input);
 
                             // 如果是完整的工具调用，添加到列表

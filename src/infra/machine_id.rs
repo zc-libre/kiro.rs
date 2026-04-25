@@ -55,28 +55,24 @@ impl MachineIdResolver {
     /// 3. 派生：API Key 凭据基于 `kiroApiKey`；OAuth 凭据基于 `refreshToken`
     /// 4. 兜底：随机种子派生，按凭据 id 在本 resolver 内缓存
     pub fn resolve(&self, credentials: &Credential, config: &Config) -> String {
-        if let Some(ref machine_id) = credentials.machine_id {
-            if let Some(normalized) = normalize_machine_id(machine_id) {
+        if let Some(ref machine_id) = credentials.machine_id
+            && let Some(normalized) = normalize_machine_id(machine_id) {
                 return normalized;
             }
-        }
-        if let Some(ref machine_id) = config.kiro.machine_id {
-            if let Some(normalized) = normalize_machine_id(machine_id) {
+        if let Some(ref machine_id) = config.kiro.machine_id
+            && let Some(normalized) = normalize_machine_id(machine_id) {
                 return normalized;
             }
-        }
 
         if credentials.is_api_key_credential() {
-            if let Some(ref api_key) = credentials.kiro_api_key {
-                if !api_key.is_empty() {
+            if let Some(ref api_key) = credentials.kiro_api_key
+                && !api_key.is_empty() {
                     return sha256_hex(&format!("KiroAPIKey/{api_key}"));
                 }
-            }
-        } else if let Some(ref refresh_token) = credentials.refresh_token {
-            if !refresh_token.is_empty() {
+        } else if let Some(ref refresh_token) = credentials.refresh_token
+            && !refresh_token.is_empty() {
                 return sha256_hex(&format!("KotlinNativeAPI/{refresh_token}"));
             }
-        }
 
         self.fallback_for(credentials)
     }

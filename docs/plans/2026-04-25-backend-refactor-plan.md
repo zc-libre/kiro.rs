@@ -1023,10 +1023,31 @@ src/
 - [x] Phase 3 complete (KiroClient)
 - [x] Phase 4 complete (Conversation 协议)
 - [x] Phase 5 complete (interface/http – Anthropic)
-- [ ] Phase 6 complete (interface/http – Admin)
-- [ ] Phase 7 complete (装配 + 删除)
+- [x] Phase 6 complete (interface/http – Admin)
+- [x] Phase 7 complete (装配 + 删除)
 - [ ] Phase 8 complete (手工冒烟 + 负载验证 + 最终静态检查)
 - [ ] Implementation complete
+
+### Phase 7 完成情况
+- Step 7.1 ✅ 新 main.rs（Config/CredentialStore/Pool/EndpointRegistry/RequestExecutor/KiroClient 全链路装配，KIRO_API_KEY 环境变量走 pool.add_credential）
+- Step 7.2 ✅ 删除 admin/admin_ui/anthropic/common/kiro/model 目录与 error.rs/http_client.rs/token.rs/debug.rs/test.rs 顶级文件，main.rs 移除老 mod 声明
+- Step 7.3 ✅ Cargo.toml 依赖审计：thiserror 已在生产依赖；anyhow 仍被 websearch 旁路使用，保留；无 dead 依赖
+- 拆 admin 操作进入 CredentialPool：新增 `service/credential_pool/admin.rs`（AdminPoolError + AdminSnapshot），pool.rs 加 `admin_snapshot` / `set_disabled` / `set_priority` / `reset_and_enable` / `switch_to_next` / `add_credential` / `delete_credential` / `force_refresh_token_for` / `get_usage_limits_for` / `set_load_balancing_mode`（持久化到 config.json）
+- service/admin/error.rs 加 `From<AdminPoolError> for AdminServiceError` 1-1 映射，彻底去除 4 个 `classify_*_error` 字符串匹配
+- service/admin/service.rs 重写：直接调 CredentialPool admin 方法 + BalanceCacheStore 替代手写 HashMap+读写文件
+- 代码 / 安全审查后续修复：
+  - `CredentialStore::add` / `remove` 持久化失败时回滚内存（避免内存与磁盘不一致）
+  - `admin/service.rs::add_credential` 加 proxy_url scheme 白名单（防 SSRF；仅允许 http/https/socks4/socks5/socks5h/direct）
+  - `pool.rs::fetch_usage_limits` upstream body 截断至 512 字节（限制错误链信息泄漏）
+  - `pool.rs::admin_snapshot` 把 `proxy_url` 中的 password 替换为 `****` 后再返回 admin UI
+  - `pool.rs::set_load_balancing_mode` 双重加锁合并为单次（消除竞争窗口）
+- 静态检查（Phase 8.4 子集）：`cargo build --release` ✅、`cargo build --no-default-features` ✅、`cargo test` 289 passed ✅、`cargo clippy --all-targets -- -D warnings` ✅
+
+### Phase 8 进度
+- Step 8.4 最终静态检查 ✅（如上四条命令全绿）
+- Step 8.1 真实凭据端到端冒烟 ❌ 待用户在本机配 `config.json` + `credentials.json` 后跑（按 README 步骤）
+- Step 8.2 负载行为验证（MAX_TOTAL_RETRIES / 自愈 / 退避时间）❌ 待用户在本机用故意失效凭据观察
+- Step 8.3 基线对照（性能/内存/二进制大小）❌ 待用户对比 master vs refactor/v2
 
 ## 阶段并行性提示
 

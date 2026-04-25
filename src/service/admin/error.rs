@@ -5,6 +5,7 @@ use std::fmt;
 use axum::http::StatusCode;
 
 use crate::interface::http::admin::dto::AdminErrorResponse;
+use crate::service::credential_pool::AdminPoolError;
 
 /// Admin 服务错误类型
 #[derive(Debug)]
@@ -58,6 +59,33 @@ impl AdminServiceError {
             }
             AdminServiceError::InvalidCredential(_) => {
                 AdminErrorResponse::invalid_request(self.to_string())
+            }
+        }
+    }
+}
+
+/// AdminPoolError → AdminServiceError 1-1 映射（取代旧字符串匹配模式）
+impl From<AdminPoolError> for AdminServiceError {
+    fn from(e: AdminPoolError) -> Self {
+        match e {
+            AdminPoolError::NotFound(id) => AdminServiceError::NotFound { id },
+            AdminPoolError::DuplicateRefreshToken
+            | AdminPoolError::DuplicateApiKey
+            | AdminPoolError::TruncatedRefreshToken(_)
+            | AdminPoolError::EmptyRefreshToken
+            | AdminPoolError::EmptyApiKey
+            | AdminPoolError::MissingRefreshToken
+            | AdminPoolError::MissingApiKey
+            | AdminPoolError::NotDisabled(_)
+            | AdminPoolError::ApiKeyNotRefreshable
+            | AdminPoolError::InvalidMode(_) => {
+                AdminServiceError::InvalidCredential(e.to_string())
+            }
+            AdminPoolError::Refresh(_)
+            | AdminPoolError::UpstreamHttp { .. }
+            | AdminPoolError::Network(_) => AdminServiceError::UpstreamError(e.to_string()),
+            AdminPoolError::Config(_) | AdminPoolError::DisabledByInvalidConfig(_) => {
+                AdminServiceError::InternalError(e.to_string())
             }
         }
     }

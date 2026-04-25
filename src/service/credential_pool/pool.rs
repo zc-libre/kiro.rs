@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use parking_lot::Mutex;
+use sha2::{Digest, Sha256};
 
 use crate::config::Config;
 use crate::domain::credential::Credential;
@@ -26,11 +27,14 @@ use crate::domain::selector::{
     CredentialSelector, CredentialStateView, CredentialStatsView, CredentialView,
 };
 use crate::domain::token::TokenSource;
+use crate::domain::usage::UsageLimitsResponse;
+use crate::infra::http::client::{ProxyConfig, build_client};
 use crate::infra::machine_id::MachineIdResolver;
 use crate::infra::refresher::{ApiKeyRefresher, IdcRefresher, SocialRefresher};
 use crate::infra::selector::{BalancedSelector, PrioritySelector};
 use crate::infra::storage::{StatsEntry, StatsFileStore};
 
+use super::admin::{AdminEntrySnapshot, AdminPoolError, AdminSnapshot};
 use super::state::{CredentialState, EntryState};
 use super::stats::{CredentialStats, EntryStats};
 use super::store::CredentialStore;
@@ -126,6 +130,9 @@ impl CredentialPool {
     }
 
     /// 切换负载均衡模式（仅接受 "priority" / "balanced"，其他保留旧值）
+    ///
+    /// 内存生效后回写 config.json；持久化失败会回滚内存值。单次加锁完成"先读后写"，
+    /// 避免双 lock() 之间的竞争窗口。
     pub fn set_load_balancing_mode(&self, mode: &str) -> Result<(), ProviderError> {
         let normalized = match mode {
             MODE_PRIORITY | MODE_BALANCED => mode.to_string(),
@@ -135,8 +142,38 @@ impl CredentialPool {
                 )));
             }
         };
-        *self.load_balancing_mode.lock() = normalized;
+
+        let previous = {
+            let mut guard = self.load_balancing_mode.lock();
+            if *guard == normalized {
+                return Ok(());
+            }
+            std::mem::replace(&mut *guard, normalized.clone())
+        };
+
+        if let Err(e) = self.persist_load_balancing_mode(&normalized) {
+            *self.load_balancing_mode.lock() = previous;
+            return Err(ProviderError::BadRequest(format!(
+                "持久化负载均衡模式失败: {e}"
+            )));
+        }
         Ok(())
+    }
+
+    fn persist_load_balancing_mode(
+        &self,
+        mode: &str,
+    ) -> Result<(), crate::domain::error::ConfigError> {
+        let path = match self.config.config_path() {
+            Some(p) => p.to_path_buf(),
+            None => {
+                tracing::warn!("配置文件路径未知，负载均衡模式仅运行时生效: {}", mode);
+                return Ok(());
+            }
+        };
+        let mut cfg = Config::load(&path)?;
+        cfg.features.load_balancing_mode = mode.to_string();
+        cfg.save()
     }
 
     /// 选凭据 + 准备 token（含必要时刷新）
@@ -214,17 +251,15 @@ impl CredentialPool {
             .unwrap_or(false);
 
         // priority 模式 current_id fast path
-        if mode != MODE_BALANCED {
-            if let Some(current) = *self.current_id.lock() {
-                if let Some(cred) = store_map.get(&current) {
+        if mode != MODE_BALANCED
+            && let Some(current) = *self.current_id.lock()
+                && let Some(cred) = store_map.get(&current) {
                     let enabled = state_map.get(&current).map(|s| !s.disabled).unwrap_or(true);
                     let opus_ok = !needs_opus || cred.supports_opus();
                     if enabled && opus_ok {
                         return Some(current);
                     }
                 }
-            }
-        }
 
         // 拼 view
         let state_views: HashMap<u64, CredentialStateView> = store_map
@@ -265,11 +300,10 @@ impl CredentialPool {
             PrioritySelector::new().select(&views, model)
         };
 
-        if mode != MODE_BALANCED {
-            if let Some(id) = selected {
+        if mode != MODE_BALANCED
+            && let Some(id) = selected {
                 *self.current_id.lock() = Some(id);
             }
-        }
 
         selected
     }
@@ -287,11 +321,10 @@ impl CredentialPool {
             return Ok((outcome.access_token, cred.clone()));
         }
 
-        if let Some(token) = cred.access_token.clone() {
-            if !is_token_expired(cred) {
+        if let Some(token) = cred.access_token.clone()
+            && !is_token_expired(cred) {
                 return Ok((token, cred.clone()));
             }
-        }
 
         // 触发 refresh
         let refresher_choice = pick_refresher_kind(cred);
@@ -402,6 +435,506 @@ impl CredentialPool {
             self.stats.upsert(id, stats);
         }
     }
+}
+
+// ============================================================================
+// Admin API 扩展（取代旧 MultiTokenManager 的 admin 方法）
+// ============================================================================
+
+impl CredentialPool {
+    /// Admin UI 数据视图：组合 store/state/stats 三层快照
+    ///
+    /// 锁顺序：store → state → stats，与 acquire 路径保持一致。
+    pub fn admin_snapshot(&self) -> AdminSnapshot {
+        let store_map = self.store.snapshot();
+        let state_map = self.state.snapshot();
+        let stats_map = self.stats.snapshot();
+        let current_id = self.current_id.lock().unwrap_or(0);
+
+        let total = store_map.len();
+        let available = store_map
+            .keys()
+            .filter(|id| !state_map.get(id).map(|s| s.disabled).unwrap_or(false))
+            .count();
+
+        let entries: Vec<AdminEntrySnapshot> = store_map
+            .iter()
+            .map(|(id, cred)| {
+                let state = state_map.get(id).cloned().unwrap_or_default();
+                let stats = stats_map.get(id).cloned().unwrap_or_default();
+                let is_api_key = cred.is_api_key_credential();
+                AdminEntrySnapshot {
+                    id: *id,
+                    priority: cred.priority,
+                    disabled: state.disabled,
+                    failure_count: state.failure_count,
+                    auth_method: if is_api_key {
+                        Some("api_key".to_string())
+                    } else {
+                        cred.auth_method
+                            .as_deref()
+                            .map(canonicalize_admin_auth_method)
+                    },
+                    has_profile_arn: cred.profile_arn.is_some(),
+                    expires_at: if is_api_key { None } else { cred.expires_at.clone() },
+                    refresh_token_hash: if is_api_key {
+                        None
+                    } else {
+                        cred.refresh_token.as_deref().map(sha256_hex)
+                    },
+                    api_key_hash: if is_api_key {
+                        cred.kiro_api_key.as_deref().map(sha256_hex)
+                    } else {
+                        None
+                    },
+                    masked_api_key: if is_api_key {
+                        cred.kiro_api_key.as_deref().map(mask_api_key)
+                    } else {
+                        None
+                    },
+                    email: cred.email.clone(),
+                    success_count: stats.success_count,
+                    last_used_at: stats.last_used_at.clone(),
+                    has_proxy: cred.proxy_url.is_some(),
+                    proxy_url: cred.proxy_url.as_deref().map(mask_proxy_url),
+                    refresh_failure_count: state.refresh_failure_count,
+                    disabled_reason: state
+                        .disabled_reason
+                        .map(|r| disabled_reason_to_str(r).to_string()),
+                    endpoint: cred.endpoint.clone(),
+                }
+            })
+            .collect();
+
+        AdminSnapshot {
+            entries,
+            current_id,
+            total,
+            available,
+        }
+    }
+
+    /// 设置凭据禁用状态（同步到 store + state，state 层会清失败计数）
+    pub fn set_disabled(&self, id: u64, disabled: bool) -> Result<(), AdminPoolError> {
+        let exists = self.store.set_disabled(id, disabled)?;
+        if !exists {
+            return Err(AdminPoolError::NotFound(id));
+        }
+        self.state.set_disabled(id, disabled);
+        Ok(())
+    }
+
+    /// 修改凭据优先级（仅 priority 模式生效；balanced 模式仅持久化）
+    pub fn set_priority(&self, id: u64, priority: u32) -> Result<(), AdminPoolError> {
+        let exists = self.store.set_priority(id, priority)?;
+        if !exists {
+            return Err(AdminPoolError::NotFound(id));
+        }
+        self.select_highest_priority();
+        Ok(())
+    }
+
+    /// 重置失败计数并启用（InvalidConfig 凭据需先修复配置后重启）
+    pub fn reset_and_enable(&self, id: u64) -> Result<(), AdminPoolError> {
+        if let Some(s) = self.state.get(id)
+            && s.disabled_reason == Some(DisabledReason::InvalidConfig) {
+                return Err(AdminPoolError::DisabledByInvalidConfig(id));
+            }
+        if self.store.get(id).is_none() {
+            return Err(AdminPoolError::NotFound(id));
+        }
+        let _ = self.store.set_disabled(id, false)?;
+        self.state.set_disabled(id, false);
+        Ok(())
+    }
+
+    /// 切换到下一可用凭据（priority 模式专用，禁用当前后调用）
+    ///
+    /// 返回 true：成功切换或当前仍可用；false：balanced 模式或全部禁用
+    pub fn switch_to_next(&self) -> bool {
+        if self.get_load_balancing_mode() == MODE_BALANCED {
+            return false;
+        }
+        let store_map = self.store.snapshot();
+        let state_map = self.state.snapshot();
+        let current = *self.current_id.lock();
+
+        let next = store_map
+            .iter()
+            .filter(|(id, _)| {
+                Some(**id) != current
+                    && !state_map.get(id).map(|s| s.disabled).unwrap_or(false)
+            })
+            .min_by_key(|(_, c)| c.priority);
+
+        if let Some((next_id, cred)) = next {
+            tracing::info!(
+                "已切换到凭据 #{}（优先级 {}）",
+                next_id,
+                cred.priority
+            );
+            *self.current_id.lock() = Some(*next_id);
+            true
+        } else if let Some(cur) = current {
+            !state_map.get(&cur).map(|s| s.disabled).unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    /// 重选 current_id 为最低 priority 的可用凭据（priority 模式生效）
+    fn select_highest_priority(&self) {
+        if self.get_load_balancing_mode() == MODE_BALANCED {
+            return;
+        }
+        let store_map = self.store.snapshot();
+        let state_map = self.state.snapshot();
+        let best = store_map
+            .iter()
+            .filter(|(id, _)| !state_map.get(id).map(|s| s.disabled).unwrap_or(false))
+            .min_by_key(|(_, c)| c.priority);
+
+        if let Some((new_id, cred)) = best {
+            let mut current = self.current_id.lock();
+            if Some(*new_id) != *current {
+                tracing::info!(
+                    "优先级变更后切换凭据: {:?} -> #{}（优先级 {}）",
+                    *current,
+                    new_id,
+                    cred.priority
+                );
+                *current = Some(*new_id);
+            }
+        }
+    }
+
+    /// 添加新凭据（验证 + 哈希去重 + 实际刷新 + 持久化）
+    pub async fn add_credential(
+        &self,
+        mut new_cred: Credential,
+    ) -> Result<u64, AdminPoolError> {
+        // 1. 基本字段校验
+        new_cred.canonicalize_auth_method();
+        if new_cred.is_api_key_credential() {
+            let api_key = new_cred
+                .kiro_api_key
+                .as_deref()
+                .ok_or(AdminPoolError::MissingApiKey)?;
+            if api_key.is_empty() {
+                return Err(AdminPoolError::EmptyApiKey);
+            }
+        } else {
+            let rt = new_cred
+                .refresh_token
+                .as_deref()
+                .ok_or(AdminPoolError::MissingRefreshToken)?;
+            if rt.is_empty() {
+                return Err(AdminPoolError::EmptyRefreshToken);
+            }
+            if rt.len() < 100 || rt.contains("...") {
+                return Err(AdminPoolError::TruncatedRefreshToken(rt.len()));
+            }
+        }
+
+        // 2. 基于 sha256 哈希检测重复
+        let store_map = self.store.snapshot();
+        if new_cred.is_api_key_credential() {
+            let new_hash = sha256_hex(new_cred.kiro_api_key.as_deref().unwrap());
+            let exists = store_map
+                .values()
+                .any(|c| c.kiro_api_key.as_deref().map(sha256_hex).as_deref() == Some(&new_hash));
+            if exists {
+                return Err(AdminPoolError::DuplicateApiKey);
+            }
+        } else {
+            let new_hash = sha256_hex(new_cred.refresh_token.as_deref().unwrap());
+            let exists = store_map
+                .values()
+                .any(|c| c.refresh_token.as_deref().map(sha256_hex).as_deref() == Some(&new_hash));
+            if exists {
+                return Err(AdminPoolError::DuplicateRefreshToken);
+            }
+        }
+        drop(store_map);
+
+        // 3. 验证有效性：API Key 跳过；OAuth 调一次 refresh 拿 access_token
+        if !new_cred.is_api_key_credential() {
+            let outcome = match pick_refresher_kind(&new_cred) {
+                RefresherKind::Idc => self.refresher_idc.refresh(&new_cred).await,
+                RefresherKind::Social => self.refresher_social.refresh(&new_cred).await,
+            }?;
+            new_cred.access_token = Some(outcome.access_token);
+            if let Some(rt) = outcome.refresh_token {
+                new_cred.refresh_token = Some(rt);
+            }
+            if let Some(arn) = outcome.profile_arn {
+                new_cred.profile_arn = Some(arn);
+            }
+            if let Some(ea) = outcome.expires_at {
+                new_cred.expires_at = Some(ea);
+            }
+        }
+
+        // 4. 写入 store（自动分配 id + 持久化）
+        let new_id = self.store.add(new_cred)?;
+        // 5. state 初始化为 enabled
+        self.state.upsert(new_id, EntryState::default());
+
+        tracing::info!("成功添加凭据 #{}", new_id);
+        Ok(new_id)
+    }
+
+    /// 删除凭据（必须已禁用；删除当前凭据时重选）
+    pub fn delete_credential(&self, id: u64) -> Result<(), AdminPoolError> {
+        if self.store.get(id).is_none() {
+            return Err(AdminPoolError::NotFound(id));
+        }
+        let is_disabled = self
+            .state
+            .get(id)
+            .map(|s| s.disabled)
+            .unwrap_or(false);
+        if !is_disabled {
+            return Err(AdminPoolError::NotDisabled(id));
+        }
+
+        let was_current = *self.current_id.lock() == Some(id);
+
+        let _ = self.store.remove(id)?;
+        self.state.remove(id);
+        self.stats.remove(id);
+
+        if was_current {
+            *self.current_id.lock() = None;
+            self.select_highest_priority();
+        }
+
+        // 立即落盘 stats，清除已删凭据残留
+        if let Some(store) = &self.stats_store {
+            let _ = store.save(&self.stats.to_storage_map());
+        }
+
+        tracing::info!("已删除凭据 #{}", id);
+        Ok(())
+    }
+
+    /// 强制刷新指定凭据 token（不论是否过期）
+    pub async fn force_refresh_token_for(&self, id: u64) -> Result<(), AdminPoolError> {
+        let cred = self.store.get(id).ok_or(AdminPoolError::NotFound(id))?;
+        if cred.is_api_key_credential() {
+            return Err(AdminPoolError::ApiKeyNotRefreshable);
+        }
+        let outcome = match pick_refresher_kind(&cred) {
+            RefresherKind::Idc => self.refresher_idc.refresh(&cred).await,
+            RefresherKind::Social => self.refresher_social.refresh(&cred).await,
+        }?;
+        let mut updated = cred;
+        updated.access_token = Some(outcome.access_token);
+        if let Some(rt) = outcome.refresh_token {
+            updated.refresh_token = Some(rt);
+        }
+        if let Some(arn) = outcome.profile_arn {
+            updated.profile_arn = Some(arn);
+        }
+        if let Some(ea) = outcome.expires_at {
+            updated.expires_at = Some(ea);
+        }
+        let _ = self.store.replace(id, updated)?;
+        self.state.report_success(id);
+        tracing::info!("凭据 #{} Token 已强制刷新", id);
+        Ok(())
+    }
+
+    /// 查询使用额度（必要时刷新 token，调上游 q.{region}.amazonaws.com/getUsageLimits）
+    pub async fn get_usage_limits_for(
+        &self,
+        id: u64,
+    ) -> Result<UsageLimitsResponse, AdminPoolError> {
+        let cred = self.store.get(id).ok_or(AdminPoolError::NotFound(id))?;
+        let (token, fresh_cred) = self.prepare_token_for_admin(id, &cred).await?;
+        let usage = self.fetch_usage_limits(&fresh_cred, &token).await?;
+
+        // 同步订阅等级到凭据（仅在变化时）
+        if let Some(title) = usage.subscription_title()
+            && fresh_cred.subscription_title.as_deref() != Some(title) {
+                let mut updated = fresh_cred.clone();
+                updated.subscription_title = Some(title.to_string());
+                let _ = self.store.replace(id, updated);
+            }
+        Ok(usage)
+    }
+
+    /// admin 路径专用 prepare_token：API Key 直用；OAuth 必要时刷新并写回
+    async fn prepare_token_for_admin(
+        &self,
+        id: u64,
+        cred: &Credential,
+    ) -> Result<(String, Credential), AdminPoolError> {
+        if cred.is_api_key_credential() {
+            let token = cred
+                .kiro_api_key
+                .clone()
+                .ok_or(AdminPoolError::MissingApiKey)?;
+            return Ok((token, cred.clone()));
+        }
+        if let Some(token) = cred.access_token.clone()
+            && !is_token_expired(cred) {
+                return Ok((token, cred.clone()));
+            }
+        let outcome = match pick_refresher_kind(cred) {
+            RefresherKind::Idc => self.refresher_idc.refresh(cred).await,
+            RefresherKind::Social => self.refresher_social.refresh(cred).await,
+        }?;
+        let mut updated = cred.clone();
+        updated.access_token = Some(outcome.access_token.clone());
+        if let Some(rt) = outcome.refresh_token {
+            updated.refresh_token = Some(rt);
+        }
+        if let Some(arn) = outcome.profile_arn {
+            updated.profile_arn = Some(arn);
+        }
+        if let Some(ea) = outcome.expires_at {
+            updated.expires_at = Some(ea);
+        }
+        let _ = self.store.replace(id, updated.clone());
+        Ok((outcome.access_token, updated))
+    }
+
+    async fn fetch_usage_limits(
+        &self,
+        cred: &Credential,
+        token: &str,
+    ) -> Result<UsageLimitsResponse, AdminPoolError> {
+        let region = cred.effective_api_region(&self.config);
+        let host = format!("q.{region}.amazonaws.com");
+        let machine_id = self.resolver.resolve(cred, &self.config);
+        let kiro_version = &self.config.kiro.kiro_version;
+        let os_name = &self.config.kiro.system_version;
+        let node_version = &self.config.kiro.node_version;
+
+        let mut url =
+            format!("https://{host}/getUsageLimits?origin=AI_EDITOR&resourceType=AGENTIC_REQUEST");
+        if let Some(profile_arn) = &cred.profile_arn {
+            url.push_str(&format!("&profileArn={}", urlencoding::encode(profile_arn)));
+        }
+
+        let user_agent = format!(
+            "aws-sdk-js/1.0.0 ua/2.1 os/{os_name} lang/js md/nodejs#{node_version} api/codewhispererruntime#1.0.0 m/N,E KiroIDE-{kiro_version}-{machine_id}"
+        );
+        let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{kiro_version}-{machine_id}");
+
+        let global_proxy = self.config.proxy.proxy_url.as_deref().map(|url| {
+            let mut p = ProxyConfig::new(url);
+            if let (Some(u), Some(pw)) = (
+                &self.config.proxy.proxy_username,
+                &self.config.proxy.proxy_password,
+            ) {
+                p = p.with_auth(u, pw);
+            }
+            p
+        });
+        let effective_proxy = cred.effective_proxy(global_proxy.as_ref());
+        let client = build_client(effective_proxy.as_ref(), 60, self.config.net.tls_backend)
+            .map_err(|e| AdminPoolError::Network(e.to_string()))?;
+
+        let mut req = client
+            .get(&url)
+            .header("x-amz-user-agent", &amz_user_agent)
+            .header("user-agent", &user_agent)
+            .header("host", &host)
+            .header("amz-sdk-invocation-id", uuid::Uuid::new_v4().to_string())
+            .header("amz-sdk-request", "attempt=1; max=1")
+            .header("Authorization", format!("Bearer {token}"))
+            .header("Connection", "close");
+        if cred.is_api_key_credential() {
+            req = req.header("tokentype", "API_KEY");
+        }
+
+        let response = req
+            .send()
+            .await
+            .map_err(|e| AdminPoolError::Network(e.to_string()))?;
+        let status = response.status();
+        if !status.is_success() {
+            let body = response.text().await.unwrap_or_default();
+            // 截断 body，避免大响应回显放大 + 限制错误链中的敏感细节泄漏
+            let body = truncate_upstream_body(&body, 512);
+            return Err(AdminPoolError::UpstreamHttp {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        let usage: UsageLimitsResponse = response
+            .json()
+            .await
+            .map_err(|e| AdminPoolError::Network(e.to_string()))?;
+        Ok(usage)
+    }
+}
+
+fn sha256_hex(input: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(input.as_bytes());
+    format!("{:x}", hasher.finalize())
+}
+
+fn mask_api_key(key: &str) -> String {
+    if key.is_ascii() && key.len() > 16 {
+        format!("{}...{}", &key[..4], &key[key.len() - 4..])
+    } else {
+        "***".to_string()
+    }
+}
+
+fn disabled_reason_to_str(reason: DisabledReason) -> &'static str {
+    match reason {
+        DisabledReason::TooManyFailures => "TooManyFailures",
+        DisabledReason::QuotaExceeded => "QuotaExceeded",
+        DisabledReason::InvalidRefreshToken => "InvalidRefreshToken",
+        DisabledReason::InvalidConfig => "InvalidConfig",
+    }
+}
+
+fn canonicalize_admin_auth_method(m: &str) -> String {
+    if m.eq_ignore_ascii_case("builder-id") || m.eq_ignore_ascii_case("iam") {
+        "idc".to_string()
+    } else {
+        m.to_string()
+    }
+}
+
+/// 把 proxy URL 中的 password 替换为 ****（保留 scheme/user/host:port）
+///
+/// 仅识别 `<scheme>://[user:password@]host:port` 形式；无 password 时原样返回。
+fn mask_proxy_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let (scheme, rest) = url.split_at(scheme_end);
+    let after = &rest[3..]; // 去掉 "://"
+    let Some(at_pos) = after.find('@') else {
+        return url.to_string();
+    };
+    let userinfo = &after[..at_pos];
+    let host_port = &after[at_pos + 1..];
+    let Some(colon_pos) = userinfo.find(':') else {
+        return url.to_string();
+    };
+    let user = &userinfo[..colon_pos];
+    format!("{scheme}://{user}:****@{host_port}")
+}
+
+/// 截断 upstream body 至 max_bytes 字节（按 UTF-8 字符边界）
+fn truncate_upstream_body(body: &str, max_bytes: usize) -> String {
+    if body.len() <= max_bytes {
+        return body.to_string();
+    }
+    // 找最近的 UTF-8 字符边界
+    let mut idx = max_bytes;
+    while idx > 0 && !body.is_char_boundary(idx) {
+        idx -= 1;
+    }
+    format!("{}…(truncated)", &body[..idx])
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -601,5 +1134,64 @@ mod tests {
         // 失败时保留旧值
         assert_eq!(pool.get_load_balancing_mode(), "priority");
         let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn mask_proxy_url_replaces_password_only() {
+        assert_eq!(
+            mask_proxy_url("http://user:pass@host:8080"),
+            "http://user:****@host:8080"
+        );
+        assert_eq!(
+            mask_proxy_url("socks5://u:p@example.com:1080"),
+            "socks5://u:****@example.com:1080"
+        );
+    }
+
+    #[test]
+    fn mask_proxy_url_preserves_no_userinfo() {
+        assert_eq!(mask_proxy_url("http://host:8080"), "http://host:8080");
+        assert_eq!(mask_proxy_url("https://example.com"), "https://example.com");
+    }
+
+    #[test]
+    fn mask_proxy_url_preserves_user_only() {
+        assert_eq!(
+            mask_proxy_url("http://user@host:8080"),
+            "http://user@host:8080"
+        );
+    }
+
+    #[test]
+    fn mask_proxy_url_preserves_invalid_format() {
+        // 无 :// 直接返回
+        assert_eq!(mask_proxy_url("not-a-url"), "not-a-url");
+        assert_eq!(mask_proxy_url(""), "");
+    }
+
+    #[test]
+    fn truncate_upstream_body_below_limit_returns_as_is() {
+        let s = "short body";
+        assert_eq!(truncate_upstream_body(s, 100), s);
+    }
+
+    #[test]
+    fn truncate_upstream_body_above_limit_truncates_with_marker() {
+        let body = "a".repeat(1000);
+        let out = truncate_upstream_body(&body, 50);
+        assert!(out.starts_with("aaaa"));
+        assert!(out.ends_with("…(truncated)"));
+        // 实际长度 ≤ 50（截断字节）+ marker；不超过 64
+        assert!(out.len() <= 64);
+    }
+
+    #[test]
+    fn truncate_upstream_body_respects_utf8_boundary() {
+        // 中文每字符 3 字节，max=4 时应截到 3 字节边界（保留 1 字符）
+        let body = "中文测试";
+        let out = truncate_upstream_body(body, 4);
+        // 至少包含一个中文字符 + marker
+        assert!(out.contains('中'));
+        assert!(out.ends_with("…(truncated)"));
     }
 }

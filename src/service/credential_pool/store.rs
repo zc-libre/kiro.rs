@@ -132,7 +132,8 @@ impl CredentialStore {
         self.inner.lock().len()
     }
 
-    /// 添加新凭据（自动分配 id），返回新 id；持久化（仅多格式）
+    /// 添加新凭据（自动分配 id），返回新 id；持久化（仅多格式）。
+    /// 持久化失败时回滚内存（next_id 不回滚以避免与并发 add 竞态产生 id 重复）。
     pub fn add(&self, mut cred: Credential) -> Result<u64, ConfigError> {
         let id = {
             let mut next = self.next_id.lock();
@@ -150,16 +151,27 @@ impl CredentialStore {
             let mut map = self.inner.lock();
             map.insert(id, cred);
         }
-        self.persist()?;
+        if let Err(e) = self.persist() {
+            self.inner.lock().remove(&id);
+            return Err(e);
+        }
         Ok(id)
     }
 
+    /// 持久化失败时回滚内存
     pub fn remove(&self, id: u64) -> Result<bool, ConfigError> {
-        let removed = self.inner.lock().remove(&id).is_some();
-        if removed {
-            self.persist()?;
+        let removed = {
+            let mut map = self.inner.lock();
+            map.remove(&id)
+        };
+        let Some(cred) = removed else {
+            return Ok(false);
+        };
+        if let Err(e) = self.persist() {
+            self.inner.lock().insert(id, cred);
+            return Err(e);
         }
-        Ok(removed)
+        Ok(true)
     }
 
     /// 写回所有字段（用于 token 刷新后更新 access_token / expires_at / refresh_token / profile_arn）

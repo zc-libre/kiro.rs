@@ -21,7 +21,7 @@ pub use admin::AdminConfig;
 pub use endpoint::EndpointConfig;
 pub use feature::FeatureFlags;
 pub use kiro::KiroIdentity;
-pub use net::{NetConfig, TlsBackend};
+pub use net::NetConfig;
 pub use proxy::GlobalProxyConfig;
 pub use region::RegionConfig;
 
@@ -77,9 +77,10 @@ impl Config {
     pub fn load<P: AsRef<Path>>(path: P) -> Result<Self, ConfigError> {
         let path = path.as_ref();
         if !path.exists() {
-            let mut config = Self::default();
-            config.config_path = Some(path.to_path_buf());
-            return Ok(config);
+            return Ok(Self {
+                config_path: Some(path.to_path_buf()),
+                ..Self::default()
+            });
         }
         let content = fs::read_to_string(path)?;
         let mut config: Config = serde_json::from_str(&content)?;

@@ -12,3 +12,4 @@ pub mod request;
 pub mod retry;
 pub mod selector;
 pub mod token;
+pub mod usage;

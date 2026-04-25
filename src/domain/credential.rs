@@ -96,6 +96,7 @@ fn canonicalize_auth_method_value(value: &str) -> &str {
 /// 凭据文件（单对象 / 数组双格式）
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
+#[allow(clippy::large_enum_variant)]
 pub enum CredentialsFile {
     Single(Credential),
     Multiple(Vec<Credential>),
