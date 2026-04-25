@@ -4,6 +4,7 @@
 
 #![allow(dead_code)]
 
+pub mod admin;
 pub mod conversation;
 pub mod credential_pool;
 pub mod kiro_client;
