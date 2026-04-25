@@ -8,6 +8,7 @@ pub mod credential;
 pub mod endpoint;
 pub mod error;
 pub mod event;
+pub mod request;
 pub mod retry;
 pub mod selector;
 pub mod token;

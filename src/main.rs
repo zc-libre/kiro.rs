@@ -7,6 +7,7 @@ mod domain;
 mod error;
 mod http_client;
 mod infra;
+mod interface;
 mod kiro;
 mod model;
 mod service;
