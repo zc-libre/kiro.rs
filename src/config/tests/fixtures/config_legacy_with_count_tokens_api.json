@@ -1,0 +1,23 @@
+{
+  "host": "127.0.0.1",
+  "port": 8990,
+  "apiKey": "sk-kiro-rs-qazWSXedcRFV123456",
+  "region": "us-east-1",
+  "tlsBackend": "rustls",
+  "kiroVersion": "0.9.2",
+  "machineId": "0000000000000000000000000000000000000000000000000000000000000000",
+  "systemVersion": "darwin#24.6.0",
+  "nodeVersion": "22.21.1",
+  "authRegion": "us-east-1",
+  "apiRegion": "us-east-1",
+  "countTokensApiUrl": "https://api.example.com/v1/messages/count_tokens",
+  "countTokensApiKey": "sk-your-count-tokens-api-key",
+  "countTokensAuthType": "x-api-key",
+  "proxyUrl": "http://127.0.0.1:7890",
+  "proxyUsername": "user",
+  "proxyPassword": "pass",
+  "adminApiKey": "sk-admin-your-secret-key",
+  "loadBalancingMode": "priority",
+  "extractThinking": true,
+  "defaultEndpoint": "ide"
+}
