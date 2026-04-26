@@ -39,14 +39,6 @@ impl BalanceCacheStore {
         }
     }
 
-    pub fn path(&self) -> Option<&PathBuf> {
-        self.path.as_ref()
-    }
-
-    pub fn ttl_secs(&self) -> i64 {
-        self.ttl_secs
-    }
-
     /// 取未过期的缓存项；过期或未命中返回 None
     pub fn get(&self, id: u64) -> Option<serde_json::Value> {
         let cache = self.cache.lock();
@@ -83,10 +75,7 @@ impl BalanceCacheStore {
         }
     }
 
-    fn load_initial(
-        path: &Option<PathBuf>,
-        ttl_secs: i64,
-    ) -> HashMap<u64, CachedBalanceEntry> {
+    fn load_initial(path: &Option<PathBuf>, ttl_secs: i64) -> HashMap<u64, CachedBalanceEntry> {
         let path = match path {
             Some(p) => p,
             None => return HashMap::new(),

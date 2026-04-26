@@ -182,9 +182,6 @@ docker-compose up
 | `systemVersion` | string | 随机 | 系统版本标识 |
 | `nodeVersion` | string | `22.21.1` | Node.js 版本标识 |
 | `tlsBackend` | string | `rustls` | TLS 后端：`rustls` 或 `native-tls` |
-| `countTokensApiUrl` | string | - | 外部 count_tokens API 地址 |
-| `countTokensApiKey` | string | - | 外部 count_tokens API 密钥 |
-| `countTokensAuthType` | string | `x-api-key` | 外部 API 认证类型：`x-api-key` 或 `bearer` |
 | `proxyUrl` | string | - | HTTP/SOCKS5 代理地址 |
 | `proxyUsername` | string | - | 代理用户名 |
 | `proxyPassword` | string | - | 代理密码 |
@@ -208,9 +205,6 @@ docker-compose up
    "nodeVersion": "22.21.1",
    "authRegion": "us-east-1",
    "apiRegion": "us-east-1",
-   "countTokensApiUrl": "https://api.example.com/v1/messages/count_tokens",
-   "countTokensApiKey": "sk-your-count-tokens-api-key",
-   "countTokensAuthType": "x-api-key",
    "proxyUrl": "http://127.0.0.1:7890",
    "proxyUsername": "user",
    "proxyPassword": "pass",

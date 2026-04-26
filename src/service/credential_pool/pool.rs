@@ -28,7 +28,7 @@ use crate::domain::selector::{
 };
 use crate::domain::token::DynTokenSource;
 use crate::domain::usage::UsageLimitsResponse;
-use crate::infra::http::client::{ProxyConfig, build_client};
+use crate::infra::http::client::{build_client, mask_proxy_url};
 use crate::infra::machine_id::MachineIdResolver;
 use crate::infra::refresher::{ApiKeyRefresher, IdcRefresher, SocialRefresher};
 use crate::infra::selector::{BalancedSelector, PrioritySelector};
@@ -112,8 +112,8 @@ impl CredentialPool {
         refresher_api_key: Arc<dyn DynTokenSource>,
     ) -> Self {
         let mode = config.features.load_balancing_mode.clone();
-        let stats_persister = stats_store
-            .map(|store| Arc::new(StatsPersister::new(stats.clone(), store)));
+        let stats_persister =
+            stats_store.map(|store| Arc::new(StatsPersister::new(stats.clone(), store)));
         Self {
             store,
             state,
@@ -139,24 +139,8 @@ impl CredentialPool {
             .clone()
     }
 
-    pub fn store(&self) -> &CredentialStore {
-        &self.store
-    }
-
-    pub fn state(&self) -> &CredentialState {
-        &self.state
-    }
-
-    pub fn stats(&self) -> &CredentialStats {
-        &self.stats
-    }
-
     pub fn config(&self) -> &Config {
         &self.config
-    }
-
-    pub fn resolver(&self) -> &MachineIdResolver {
-        &self.resolver
     }
 
     pub fn total_count(&self) -> usize {
@@ -263,7 +247,11 @@ impl CredentialPool {
                     });
                 }
                 Err(refresh_err) => {
-                    tracing::warn!(id = selected, ?refresh_err, "凭据 token 准备失败，回退到下一条");
+                    tracing::warn!(
+                        id = selected,
+                        ?refresh_err,
+                        "凭据 token 准备失败，回退到下一条"
+                    );
                     match refresh_err {
                         RefreshError::TokenInvalid => {
                             self.state.report_refresh_token_invalid(selected);
@@ -295,13 +283,14 @@ impl CredentialPool {
         // priority 模式 current_id fast path
         if mode != MODE_BALANCED
             && let Some(current) = *self.current_id.lock()
-                && let Some(cred) = store_map.get(&current) {
-                    let enabled = state_map.get(&current).map(|s| !s.disabled).unwrap_or(true);
-                    let opus_ok = !needs_opus || cred.supports_opus();
-                    if enabled && opus_ok {
-                        return Some(current);
-                    }
-                }
+            && let Some(cred) = store_map.get(&current)
+        {
+            let enabled = state_map.get(&current).map(|s| !s.disabled).unwrap_or(true);
+            let opus_ok = !needs_opus || cred.supports_opus();
+            if enabled && opus_ok {
+                return Some(current);
+            }
+        }
 
         // 拼 view
         let state_views: HashMap<u64, CredentialStateView> = store_map
@@ -343,9 +332,10 @@ impl CredentialPool {
         };
 
         if mode != MODE_BALANCED
-            && let Some(id) = selected {
-                *self.current_id.lock() = Some(id);
-            }
+            && let Some(id) = selected
+        {
+            *self.current_id.lock() = Some(id);
+        }
 
         selected
     }
@@ -368,6 +358,9 @@ impl CredentialPool {
         if let Some(token) = cred.access_token.clone()
             && !is_token_expired(cred)
         {
+            if is_token_expiring_soon(cred) {
+                tracing::warn!(id, "token 即将过期 (< 10min)，建议尽快刷新");
+            }
             return Ok((token, cred.clone()));
         }
 
@@ -418,10 +411,6 @@ impl CredentialPool {
 
     pub fn report_quota_exhausted(&self, id: u64) -> bool {
         self.state.report_quota_exhausted(id)
-    }
-
-    pub fn report_refresh_failure(&self, id: u64) -> bool {
-        self.state.report_refresh_failure(id)
     }
 
     pub fn report_refresh_token_invalid(&self, id: u64) -> bool {
@@ -565,7 +554,11 @@ impl CredentialPool {
                             .map(canonicalize_admin_auth_method)
                     },
                     has_profile_arn: cred.profile_arn.is_some(),
-                    expires_at: if is_api_key { None } else { cred.expires_at.clone() },
+                    expires_at: if is_api_key {
+                        None
+                    } else {
+                        cred.expires_at.clone()
+                    },
                     refresh_token_hash: if is_api_key {
                         None
                     } else {
@@ -626,9 +619,10 @@ impl CredentialPool {
     /// 重置失败计数并启用（InvalidConfig 凭据需先修复配置后重启）
     pub fn reset_and_enable(&self, id: u64) -> Result<(), AdminPoolError> {
         if let Some(s) = self.state.get(id)
-            && s.disabled_reason == Some(DisabledReason::InvalidConfig) {
-                return Err(AdminPoolError::DisabledByInvalidConfig(id));
-            }
+            && s.disabled_reason == Some(DisabledReason::InvalidConfig)
+        {
+            return Err(AdminPoolError::DisabledByInvalidConfig(id));
+        }
         if self.store.get(id).is_none() {
             return Err(AdminPoolError::NotFound(id));
         }
@@ -651,18 +645,13 @@ impl CredentialPool {
         let next = store_map
             .iter()
             .filter(|(id, _)| {
-                Some(**id) != current
-                    && !state_map.get(id).map(|s| s.disabled).unwrap_or(false)
+                Some(**id) != current && !state_map.get(id).map(|s| s.disabled).unwrap_or(false)
             })
             // priority 平局按 id 升序，结果稳定
             .min_by_key(|(id, c)| (c.priority, **id));
 
         if let Some((next_id, cred)) = next {
-            tracing::info!(
-                "已切换到凭据 #{}（优先级 {}）",
-                next_id,
-                cred.priority
-            );
+            tracing::info!("已切换到凭据 #{}（优先级 {}）", next_id, cred.priority);
             *self.current_id.lock() = Some(*next_id);
             true
         } else if let Some(cur) = current {
@@ -700,10 +689,7 @@ impl CredentialPool {
     }
 
     /// 添加新凭据（验证 + 哈希去重 + 实际刷新 + 持久化）
-    pub async fn add_credential(
-        &self,
-        mut new_cred: Credential,
-    ) -> Result<u64, AdminPoolError> {
+    pub async fn add_credential(&self, mut new_cred: Credential) -> Result<u64, AdminPoolError> {
         // 1. 基本字段校验
         new_cred.canonicalize_auth_method();
         if new_cred.is_api_key_credential() {
@@ -771,11 +757,7 @@ impl CredentialPool {
         if self.store.get(id).is_none() {
             return Err(AdminPoolError::NotFound(id));
         }
-        let is_disabled = self
-            .state
-            .get(id)
-            .map(|s| s.disabled)
-            .unwrap_or(false);
+        let is_disabled = self.state.get(id).map(|s| s.disabled).unwrap_or(false);
         if !is_disabled {
             return Err(AdminPoolError::NotDisabled(id));
         }
@@ -837,11 +819,12 @@ impl CredentialPool {
 
         // 同步订阅等级到凭据（仅在变化时）
         if let Some(title) = usage.subscription_title()
-            && fresh_cred.subscription_title.as_deref() != Some(title) {
-                let mut updated = fresh_cred.clone();
-                updated.subscription_title = Some(title.to_string());
-                let _ = self.store.replace(id, updated);
-            }
+            && fresh_cred.subscription_title.as_deref() != Some(title)
+        {
+            let mut updated = fresh_cred.clone();
+            updated.subscription_title = Some(title.to_string());
+            let _ = self.store.replace(id, updated);
+        }
         Ok(usage)
     }
 
@@ -914,16 +897,7 @@ impl CredentialPool {
         );
         let amz_user_agent = format!("aws-sdk-js/1.0.0 KiroIDE-{kiro_version}-{machine_id}");
 
-        let global_proxy = self.config.proxy.proxy_url.as_deref().map(|url| {
-            let mut p = ProxyConfig::new(url);
-            if let (Some(u), Some(pw)) = (
-                &self.config.proxy.proxy_username,
-                &self.config.proxy.proxy_password,
-            ) {
-                p = p.with_auth(u, pw);
-            }
-            p
-        });
+        let global_proxy = self.config.proxy.to_proxy_config();
         let effective_proxy = cred.effective_proxy(global_proxy.as_ref());
         let client = build_client(effective_proxy.as_ref(), 60, self.config.net.tls_backend)
             .map_err(|e| AdminPoolError::Network(e.to_string()))?;
@@ -996,27 +970,6 @@ fn canonicalize_admin_auth_method(m: &str) -> String {
     }
 }
 
-/// 把 proxy URL 中的 password 替换为 ****（保留 scheme/user/host:port）
-///
-/// 仅识别 `<scheme>://[user:password@]host:port` 形式；无 password 时原样返回。
-fn mask_proxy_url(url: &str) -> String {
-    let Some(scheme_end) = url.find("://") else {
-        return url.to_string();
-    };
-    let (scheme, rest) = url.split_at(scheme_end);
-    let after = &rest[3..]; // 去掉 "://"
-    let Some(at_pos) = after.find('@') else {
-        return url.to_string();
-    };
-    let userinfo = &after[..at_pos];
-    let host_port = &after[at_pos + 1..];
-    let Some(colon_pos) = userinfo.find(':') else {
-        return url.to_string();
-    };
-    let user = &userinfo[..colon_pos];
-    format!("{scheme}://{user}:****@{host_port}")
-}
-
 /// 截断 upstream body 至 max_bytes 字节（按 UTF-8 字符边界）
 fn truncate_upstream_body(body: &str, max_bytes: usize) -> String {
     if body.len() <= max_bytes {
@@ -1063,6 +1016,18 @@ fn is_token_expired(cred: &Credential) -> bool {
         return true;
     };
     expires <= Utc::now() + Duration::minutes(5)
+}
+
+/// 判断 token 是否在 10 分钟内过期（含 5 分钟内已强制 refresh 的情况）。
+/// `expires_at` 缺失或解析失败返回 false，避免 API Key / 配置异常时误报警。
+fn is_token_expiring_soon(cred: &Credential) -> bool {
+    let Some(expires_at) = &cred.expires_at else {
+        return false;
+    };
+    let Ok(expires) = DateTime::parse_from_rfc3339(expires_at) else {
+        return false;
+    };
+    expires <= Utc::now() + Duration::minutes(10)
 }
 
 #[cfg(test)]
@@ -1203,7 +1168,10 @@ mod tests {
             1,
             "single-flight：同一凭据并发 acquire 仅刷新 1 次"
         );
-        assert_eq!(ctx1.token, ctx2.token, "两个并发 acquire 应拿到同一 access_token");
+        assert_eq!(
+            ctx1.token, ctx2.token,
+            "两个并发 acquire 应拿到同一 access_token"
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -1288,10 +1256,7 @@ mod tests {
         let start = std::time::Instant::now();
         let p1 = pool.clone();
         let p2 = pool.clone();
-        let (r1, r2) = tokio::join!(
-            p1.force_refresh_token_for(1),
-            p2.force_refresh_token_for(2),
-        );
+        let (r1, r2) = tokio::join!(p1.force_refresh_token_for(1), p2.force_refresh_token_for(2),);
         let elapsed = start.elapsed();
         r1.expect("refresh id=1");
         r2.expect("refresh id=2");
@@ -1310,7 +1275,11 @@ mod tests {
         let id = pool.store.ids()[0];
         pool.set_disabled(id, true).unwrap();
         let snap = pool.admin_snapshot();
-        let entry = snap.entries.iter().find(|e| e.id == id).expect("entry exists");
+        let entry = snap
+            .entries
+            .iter()
+            .find(|e| e.id == id)
+            .expect("entry exists");
         assert!(entry.disabled);
         assert_eq!(entry.disabled_reason.as_deref(), Some("Manual"));
         let _ = fs::remove_file(&path);
@@ -1331,7 +1300,11 @@ mod tests {
     }
 
     /// 构造带 stats_store 的 pool，用于测试 stats 持久化路径。
-    fn pool_with_stats_store(n: usize, mode: &str, stats_path: &std::path::Path) -> (CredentialPool, PathBuf) {
+    fn pool_with_stats_store(
+        n: usize,
+        mode: &str,
+        stats_path: &std::path::Path,
+    ) -> (CredentialPool, PathBuf) {
         let creds_path = tmp_path("pool-with-stats");
         let mut creds_json = Vec::new();
         for i in 0..n {
@@ -1356,14 +1329,7 @@ mod tests {
         let state = Arc::new(CredentialState::new());
         let stats = Arc::new(CredentialStats::new());
         let stats_file = Arc::new(StatsFileStore::new(Some(stats_path.to_path_buf())));
-        let pool = CredentialPool::new(
-            store,
-            state,
-            stats,
-            Some(stats_file),
-            config,
-            resolver,
-        );
+        let pool = CredentialPool::new(store, state, stats, Some(stats_file), config, resolver);
         let invalid: HashSet<u64> = HashSet::new();
         let initial_disabled: HashSet<u64> = HashSet::new();
         pool.install_initial_states(&invalid, &initial_disabled);
@@ -1427,7 +1393,10 @@ mod tests {
         let (pool, path) = pool_with_tied_priorities(3, MODE_PRIORITY, 0);
 
         let id1 = pool.acquire(None).await.unwrap().id;
-        assert_eq!(id1, 1, "首次 acquire 应选最低 id（priority 平局时按 id 升序）");
+        assert_eq!(
+            id1, 1,
+            "首次 acquire 应选最低 id（priority 平局时按 id 升序）"
+        );
 
         pool.set_disabled(id1, true).unwrap();
         let id2 = pool.acquire(None).await.unwrap().id;
@@ -1497,14 +1466,7 @@ mod tests {
         let store = Arc::new(store);
         let state = Arc::new(CredentialState::new());
         let stats = Arc::new(CredentialStats::new());
-        let pool = CredentialPool::new(
-            store,
-            state,
-            stats,
-            None,
-            config,
-            resolver,
-        );
+        let pool = CredentialPool::new(store, state, stats, None, config, resolver);
         let invalid: HashSet<u64> = HashSet::new();
         let initial_disabled: HashSet<u64> = HashSet::new();
         pool.install_initial_states(&invalid, &initial_disabled);
@@ -1516,7 +1478,10 @@ mod tests {
         let (pool, path) = pool_with_n_credentials(3, MODE_PRIORITY);
         // priority=0 凭据是 store.load 排序后的第一个，id=1
         let snap = pool.admin_snapshot();
-        assert_eq!(snap.current_id, 1, "current_id 应在装载后初始化为最低 priority 的 id");
+        assert_eq!(
+            snap.current_id, 1,
+            "current_id 应在装载后初始化为最低 priority 的 id"
+        );
         let _ = fs::remove_file(&path);
     }
 
@@ -1528,7 +1493,9 @@ mod tests {
             {"refreshToken":"rt-1","accessToken":"at-1","expiresAt":far_future_expires_at(),"authMethod":"social","priority":1},
         ]);
         fs::write(&path, serde_json::to_string_pretty(&arr).unwrap()).unwrap();
-        let file = Arc::new(crate::infra::storage::CredentialsFileStore::new(Some(path.clone())));
+        let file = Arc::new(crate::infra::storage::CredentialsFileStore::new(Some(
+            path.clone(),
+        )));
         let mut config = Config::default();
         config.features.load_balancing_mode = MODE_PRIORITY.to_string();
         let config = Arc::new(config);
@@ -1666,8 +1633,10 @@ mod tests {
     fn pool_with_failing_persist() -> (CredentialPool, PathBuf) {
         let creds_path = tmp_path("rollback-creds");
         fs::write(&creds_path, "[]").unwrap();
-        let invalid_cfg_path = std::env::temp_dir()
-            .join(format!("kiro-rs-pool-rollback-{}/missing-dir/cfg.json", Uuid::new_v4()));
+        let invalid_cfg_path = std::env::temp_dir().join(format!(
+            "kiro-rs-pool-rollback-{}/missing-dir/cfg.json",
+            Uuid::new_v4()
+        ));
         // Config::load：path 不存在但允许，返回默认 Config + config_path 设为该路径；
         // 之后 Config::save 在不存在的父目录上调 fs::write 必然失败
         let mut config = Config::load(&invalid_cfg_path).unwrap();
@@ -1808,5 +1777,48 @@ mod tests {
         // 至少包含一个中文字符 + marker
         assert!(out.contains('中'));
         assert!(out.ends_with("…(truncated)"));
+    }
+
+    #[test]
+    fn is_token_expiring_soon_returns_true_within_10_min() {
+        // 7 分钟后过期，落在 10 分钟阈值内
+        let cred = Credential {
+            expires_at: Some((Utc::now() + Duration::minutes(7)).to_rfc3339()),
+            ..Default::default()
+        };
+        assert!(is_token_expiring_soon(&cred));
+
+        // 边界：刚好 10 分钟，仍应返回 true（<= 阈值）
+        let cred_boundary = Credential {
+            expires_at: Some(
+                (Utc::now() + Duration::minutes(10) - Duration::seconds(1)).to_rfc3339(),
+            ),
+            ..Default::default()
+        };
+        assert!(is_token_expiring_soon(&cred_boundary));
+    }
+
+    #[test]
+    fn is_token_expiring_soon_returns_false_after_10_min() {
+        // 30 分钟后过期，远超阈值
+        let cred = Credential {
+            expires_at: Some((Utc::now() + Duration::minutes(30)).to_rfc3339()),
+            ..Default::default()
+        };
+        assert!(!is_token_expiring_soon(&cred));
+
+        // expires_at 缺失 → false（不告警）
+        let cred_none = Credential {
+            expires_at: None,
+            ..Default::default()
+        };
+        assert!(!is_token_expiring_soon(&cred_none));
+
+        // 解析失败 → false
+        let cred_bad = Credential {
+            expires_at: Some("not-a-date".into()),
+            ..Default::default()
+        };
+        assert!(!is_token_expiring_soon(&cred_bad));
     }
 }

@@ -21,15 +21,18 @@ use std::time::Duration;
 use tokio::time::interval;
 use uuid::Uuid;
 
+use super::dto::{
+    CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, ModelsResponse,
+    OutputConfig, Thinking,
+};
+use super::middleware::AppState;
+use super::models::supported_models;
 use crate::interface::http::error::kiro_error_response;
 use crate::service::conversation::converter::{ConversionError, convert_request};
 use crate::service::conversation::delivery::DeliveryMode;
 use crate::service::conversation::delivery::{BufferedStreamContext, StreamContext};
 use crate::service::conversation::reducer::SseEvent;
 use crate::service::conversation::websearch;
-use super::dto::{CountTokensRequest, CountTokensResponse, ErrorResponse, MessagesRequest, ModelsResponse, OutputConfig, Thinking};
-use super::middleware::AppState;
-use super::models::supported_models;
 
 /// 将 ProviderError 包装为 KiroError 后委托给统一的错误响应映射。
 fn map_provider_error(err: ProviderError) -> Response {
@@ -170,12 +173,8 @@ async fn post_messages_impl(
     tracing::debug!("Kiro request body: {}", request_body);
 
     // 估算输入 tokens
-    let input_tokens = token::count_all_tokens(
-        payload.system,
-        payload.messages,
-        payload.tools,
-    )
-    .await as i32;
+    let input_tokens =
+        token::count_all_tokens(payload.system, payload.messages, payload.tools).await as i32;
 
     // 检查是否启用了thinking
     let thinking_enabled = payload
@@ -201,7 +200,15 @@ async fn post_messages_impl(
     } else {
         // 非流式响应：仅在配置开启时提取 thinking 块
         let extract_thinking = state.extract_thinking && thinking_enabled;
-        handle_non_stream_request(provider, &request_body, &payload.model, input_tokens, extract_thinking, tool_name_map).await
+        handle_non_stream_request(
+            provider,
+            &request_body,
+            &payload.model,
+            input_tokens,
+            extract_thinking,
+            tool_name_map,
+        )
+        .await
     }
 }
 
@@ -227,14 +234,19 @@ async fn handle_stream_request_unified(
 
     match mode {
         DeliveryMode::Live => {
-            let mut ctx =
-                StreamContext::new_with_thinking(model, input_tokens, thinking_enabled, tool_name_map);
+            let mut ctx = StreamContext::new_with_thinking(
+                model,
+                input_tokens,
+                thinking_enabled,
+                tool_name_map,
+            );
             let initial_events = ctx.generate_initial_events();
             let stream = create_sse_stream(response, ctx, initial_events);
             build_sse_response(stream)
         }
         DeliveryMode::Buffered => {
-            let ctx = BufferedStreamContext::new(model, input_tokens, thinking_enabled, tool_name_map);
+            let ctx =
+                BufferedStreamContext::new(model, input_tokens, thinking_enabled, tool_name_map);
             let stream = create_buffered_sse_stream(response, ctx);
             build_sse_response(stream)
         }
@@ -427,14 +439,14 @@ async fn handle_non_stream_request(
                                 let input: serde_json::Value = if buffer.is_empty() {
                                     serde_json::json!({})
                                 } else {
-                                    serde_json::from_str(buffer)
-                                        .unwrap_or_else(|e| {
-                                            tracing::warn!(
-                                                "工具输入 JSON 解析失败: {}, tool_use_id: {}",
-                                                e, tool_use.tool_use_id
-                                            );
-                                            serde_json::json!({})
-                                        })
+                                    serde_json::from_str(buffer).unwrap_or_else(|e| {
+                                        tracing::warn!(
+                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}",
+                                            e,
+                                            tool_use.tool_use_id
+                                        );
+                                        serde_json::json!({})
+                                    })
                                 };
 
                                 let original_name = tool_name_map
@@ -453,10 +465,9 @@ async fn handle_non_stream_request(
                         Event::ContextUsage(context_usage) => {
                             // 从上下文使用百分比计算实际的 input_tokens
                             let window_size = get_context_window_size(model);
-                            let actual_input_tokens = (context_usage.context_usage_percentage
-                                * (window_size as f64)
-                                / 100.0)
-                                as i32;
+                            let actual_input_tokens =
+                                (context_usage.context_usage_percentage * (window_size as f64)
+                                    / 100.0) as i32;
                             context_input_tokens = Some(actual_input_tokens);
                             // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
                             if context_usage.context_usage_percentage >= 100.0 {
@@ -494,7 +505,9 @@ async fn handle_non_stream_request(
     if thinking_enabled {
         // 从完整文本中提取 thinking 块
         let (thinking, remaining_text) =
-            crate::service::conversation::thinking::extract_thinking_from_complete_text(&text_content);
+            crate::service::conversation::thinking::extract_thinking_from_complete_text(
+                &text_content,
+            );
 
         if let Some(thinking_text) = thinking {
             content.push(json!({
@@ -553,14 +566,10 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         return;
     }
 
-    let is_opus_4_6 =
-        model_lower.contains("opus") && (model_lower.contains("4-6") || model_lower.contains("4.6"));
+    let is_opus_4_6 = model_lower.contains("opus")
+        && (model_lower.contains("4-6") || model_lower.contains("4.6"));
 
-    let thinking_type = if is_opus_4_6 {
-        "adaptive"
-    } else {
-        "enabled"
-    };
+    let thinking_type = if is_opus_4_6 { "adaptive" } else { "enabled" };
 
     tracing::info!(
         model = %payload.model,
@@ -572,7 +581,7 @@ fn override_thinking_from_model_name(payload: &mut MessagesRequest) {
         thinking_type: thinking_type.to_string(),
         budget_tokens: 20000,
     });
-    
+
     if is_opus_4_6 {
         payload.output_config = Some(OutputConfig {
             effort: "high".to_string(),
@@ -592,12 +601,8 @@ pub async fn count_tokens(
         "Received POST /v1/messages/count_tokens request"
     );
 
-    let total_tokens = token::count_all_tokens(
-        payload.system,
-        payload.messages,
-        payload.tools,
-    )
-    .await as i32;
+    let total_tokens =
+        token::count_all_tokens(payload.system, payload.messages, payload.tools).await as i32;
 
     Json(CountTokensResponse {
         input_tokens: total_tokens.max(1) as i32,
@@ -726,7 +731,9 @@ mod tests {
 
     #[tokio::test]
     async fn map_provider_error_returns_503_for_endpoint_resolution() {
-        let resp = map_provider_error(ProviderError::EndpointResolution("ide endpoint missing".into()));
+        let resp = map_provider_error(ProviderError::EndpointResolution(
+            "ide endpoint missing".into(),
+        ));
         let (status, json) = body_json(resp).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json["error"]["type"], "api_error");

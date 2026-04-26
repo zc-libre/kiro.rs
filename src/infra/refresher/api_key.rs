@@ -51,6 +51,9 @@ mod tests {
     async fn refresh_missing_kiro_api_key_returns_unauthorized() {
         let cred = Credential::default();
         let r = ApiKeyRefresher::new();
-        assert!(matches!(r.refresh(&cred).await, Err(RefreshError::Unauthorized)));
+        assert!(matches!(
+            r.refresh(&cred).await,
+            Err(RefreshError::Unauthorized)
+        ));
     }
 }

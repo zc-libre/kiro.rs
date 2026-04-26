@@ -141,10 +141,6 @@ impl CredentialsFile {
 impl Credential {
     pub const PROXY_DIRECT: &'static str = "direct";
 
-    pub fn default_credentials_path() -> &'static str {
-        "credentials.json"
-    }
-
     /// 凭据.auth_region > 凭据.region > config.auth_region > config.region
     pub fn effective_auth_region<'a>(&'a self, config: &'a Config) -> &'a str {
         self.auth_region
@@ -281,11 +277,6 @@ mod tests {
     }
 
     #[test]
-    fn test_default_credentials_path() {
-        assert_eq!(Credential::default_credentials_path(), "credentials.json");
-    }
-
-    #[test]
     fn test_priority_default() {
         let json = r#"{"refreshToken": "test"}"#;
         let creds = Credential::from_json(json).unwrap();
@@ -373,9 +364,7 @@ mod tests {
     #[test]
     fn test_machine_id_field_parsing() {
         let machine_id = "a".repeat(64);
-        let json = format!(
-            r#"{{"refreshToken": "test_refresh", "machineId": "{machine_id}"}}"#
-        );
+        let json = format!(r#"{{"refreshToken": "test_refresh", "machineId": "{machine_id}"}}"#);
         let creds = Credential::from_json(&json).unwrap();
         assert_eq!(creds.refresh_token, Some("test_refresh".to_string()));
         assert_eq!(creds.machine_id, Some(machine_id));

@@ -31,14 +31,6 @@ impl KiroClient {
         }
     }
 
-    pub fn pool(&self) -> Arc<CredentialPool> {
-        self.pool.clone()
-    }
-
-    pub fn endpoints(&self) -> Arc<EndpointRegistry> {
-        self.endpoints.clone()
-    }
-
     /// API 请求（流式与非流式共享：差异仅在 caller 是否缓冲响应）
     pub async fn call_api(
         &self,

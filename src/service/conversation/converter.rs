@@ -18,8 +18,8 @@ use crate::domain::request::tool::{ToolResult, ToolUseEntry};
 use crate::interface::http::anthropic::dto::{ContentBlock, MessagesRequest};
 
 use super::tools::{
-    collect_history_tool_names, convert_tools, create_placeholder_tool, extract_tool_result_content,
-    map_tool_name, remove_orphaned_tool_uses, validate_tool_pairing,
+    collect_history_tool_names, convert_tools, create_placeholder_tool,
+    extract_tool_result_content, map_tool_name, remove_orphaned_tool_uses, validate_tool_pairing,
 };
 
 /// 追加到系统提示词的分块写入策略
@@ -108,9 +108,10 @@ fn extract_session_id(user_id: &str) -> Option<String> {
     // 先尝试 JSON 解析
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(user_id)
         && let Some(session_id) = json.get("session_id").and_then(|v| v.as_str())
-            && is_valid_uuid(session_id) {
-                return Some(session_id.to_string());
-            }
+        && is_valid_uuid(session_id)
+    {
+        return Some(session_id.to_string());
+    }
 
     // 回退到字符串格式: 查找 "session_" 后面的内容
     if let Some(pos) = user_id.find("session_") {
@@ -235,10 +236,7 @@ pub fn convert_request(req: &MessagesRequest) -> Result<ConversionResult, Conver
         .with_history(history);
 
     if !tool_name_map.is_empty() {
-        tracing::info!(
-            "工具名称映射: {} 个超长名称已缩短",
-            tool_name_map.len()
-        );
+        tracing::info!("工具名称映射: {} 个超长名称已缩短", tool_name_map.len());
     }
 
     Ok(ConversionResult {
@@ -276,9 +274,10 @@ fn process_message_content(
                         }
                         "image" => {
                             if let Some(source) = block.source
-                                && let Some(format) = get_image_format(&source.media_type) {
-                                    images.push(KiroImage::from_base64(format, source.data));
-                                }
+                                && let Some(format) = get_image_format(&source.media_type)
+                            {
+                                images.push(KiroImage::from_base64(format, source.data));
+                            }
                         }
                         "tool_result" => {
                             if let Some(tool_use_id) = block.tool_use_id {
@@ -357,7 +356,12 @@ fn has_thinking_tags(content: &str) -> bool {
 ///   注意：该切片与 `req.messages` 可能不同（prefill 时会截断末尾的 assistant 消息），
 ///   调用方应始终使用此参数而非 `req.messages`。
 /// * `model_id` - 已映射的 Kiro 模型 ID
-fn build_history(req: &MessagesRequest, messages: &[crate::interface::http::anthropic::dto::Message], model_id: &str, tool_name_map: &mut HashMap<String, String>) -> Result<Vec<Message>, ConversionError> {
+fn build_history(
+    req: &MessagesRequest,
+    messages: &[crate::interface::http::anthropic::dto::Message],
+    model_id: &str,
+    tool_name_map: &mut HashMap<String, String>,
+) -> Result<Vec<Message>, ConversionError> {
     let mut history = Vec::new();
 
     // 生成thinking前缀（如果需要）
@@ -519,7 +523,8 @@ fn convert_assistant_message(
                             if let (Some(id), Some(name)) = (block.id, block.name) {
                                 let input = block.input.unwrap_or(serde_json::json!({}));
                                 let mapped_name = map_tool_name(&name, tool_name_map);
-                                tool_uses.push(ToolUseEntry::new(id, mapped_name).with_input(input));
+                                tool_uses
+                                    .push(ToolUseEntry::new(id, mapped_name).with_input(input));
                             }
                         }
                         _ => {}
@@ -600,8 +605,8 @@ fn merge_assistant_messages(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::super::tools::TOOL_NAME_MAX_LEN;
+    use super::*;
 
     #[test]
     fn test_map_model_sonnet() {
@@ -693,9 +698,12 @@ mod tests {
 
     #[test]
     fn test_tool_name_mapping_in_convert_request() {
-        use crate::interface::http::anthropic::dto::{Message as AnthropicMessage, Tool as AnthropicTool};
+        use crate::interface::http::anthropic::dto::{
+            Message as AnthropicMessage, Tool as AnthropicTool,
+        };
 
-        let long_tool_name = "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
+        let long_tool_name =
+            "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
         assert!(long_tool_name.len() > TOOL_NAME_MAX_LEN);
 
         let mut schema = std::collections::HashMap::new();
@@ -705,12 +713,10 @@ mod tests {
         let req = MessagesRequest {
             model: "claude-sonnet-4".to_string(),
             max_tokens: 1024,
-            messages: vec![
-                AnthropicMessage {
-                    role: "user".to_string(),
-                    content: serde_json::json!("test"),
-                },
-            ],
+            messages: vec![AnthropicMessage {
+                role: "user".to_string(),
+                content: serde_json::json!("test"),
+            }],
             system: None,
             stream: false,
             tools: Some(vec![AnthropicTool {
@@ -737,16 +743,23 @@ mod tests {
         assert!(short.len() <= TOOL_NAME_MAX_LEN);
 
         // Kiro 请求中的工具名应该是短名称
-        let tools = &result.conversation_state.current_message.user_input_message
-            .user_input_message_context.tools;
+        let tools = &result
+            .conversation_state
+            .current_message
+            .user_input_message
+            .user_input_message_context
+            .tools;
         assert_eq!(tools[0].tool_specification.name, *short);
     }
 
     #[test]
     fn test_tool_name_mapping_in_history() {
-        use crate::interface::http::anthropic::dto::{Message as AnthropicMessage, Tool as AnthropicTool};
+        use crate::interface::http::anthropic::dto::{
+            Message as AnthropicMessage, Tool as AnthropicTool,
+        };
 
-        let long_tool_name = "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
+        let long_tool_name =
+            "mcp__plugin_very_long_server_name__extremely_long_tool_name_exceeds_63";
 
         let mut schema = std::collections::HashMap::new();
         schema.insert("type".to_string(), serde_json::json!("object"));
@@ -797,14 +810,15 @@ mod tests {
         let mut found = false;
         for msg in history {
             if let Message::Assistant(a) = msg
-                && let Some(ref tool_uses) = a.assistant_response_message.tool_uses {
-                    for tu in tool_uses {
-                        if tu.tool_use_id == "toolu_01" {
-                            assert_eq!(tu.name, short_name, "历史中的 tool_use name 应该是短名称");
-                            found = true;
-                        }
+                && let Some(ref tool_uses) = a.assistant_response_message.tool_uses
+            {
+                for tu in tool_uses {
+                    if tu.tool_use_id == "toolu_01" {
+                        assert_eq!(tu.name, short_name, "历史中的 tool_use name 应该是短名称");
+                        found = true;
                     }
                 }
+            }
         }
         assert!(found, "应该在历史中找到 tool_use");
     }
@@ -1071,9 +1085,15 @@ mod tests {
 
         let content = &result.assistant_response_message.content;
         assert!(content.contains("<thinking>"), "应包含 thinking 标签");
-        assert!(content.contains("Let me read that file"), "应包含第二条消息的 text 内容");
+        assert!(
+            content.contains("Let me read that file"),
+            "应包含第二条消息的 text 内容"
+        );
 
-        let tool_uses = result.assistant_response_message.tool_uses.expect("应有 tool_uses");
+        let tool_uses = result
+            .assistant_response_message
+            .tool_uses
+            .expect("应有 tool_uses");
         assert_eq!(tool_uses.len(), 1);
         assert_eq!(tool_uses[0].tool_use_id, "toolu_01ABC");
     }
@@ -1123,17 +1143,22 @@ mod tests {
         };
 
         let result = convert_request(&req);
-        assert!(result.is_ok(), "连续 assistant 消息场景不应报错: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "连续 assistant 消息场景不应报错: {:?}",
+            result.err()
+        );
 
         let state = result.unwrap().conversation_state;
         let mut found_tool_use = false;
         for msg in &state.history {
             if let Message::Assistant(assistant_msg) = msg
                 && let Some(ref tool_uses) = assistant_msg.assistant_response_message.tool_uses
-                    && tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ") {
-                        found_tool_use = true;
-                        break;
-                    }
+                && tool_uses.iter().any(|t| t.tool_use_id == "toolu_01XYZ")
+            {
+                found_tool_use = true;
+                break;
+            }
         }
         assert!(found_tool_use, "合并后的 assistant 消息应包含 tool_use");
     }

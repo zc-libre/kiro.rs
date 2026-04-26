@@ -59,9 +59,6 @@ pub enum AdminPoolError {
 
     #[error("上游网络错误: {0}")]
     Network(String),
-
-    #[error("无效模式: {0}")]
-    InvalidMode(String),
 }
 
 /// 单条凭据 admin 视图

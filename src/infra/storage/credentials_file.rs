@@ -14,10 +14,6 @@ impl CredentialsFileStore {
         Self { path }
     }
 
-    pub fn path(&self) -> Option<&PathBuf> {
-        self.path.as_ref()
-    }
-
     /// 加载凭据文件，返回 (按 priority 排序的凭据, is_multiple_format)
     ///
     /// - 文件不存在：返回 (vec![], false)

@@ -2,8 +2,6 @@
 //!
 //! 子模块直接通过 `crate::service::conversation::<sub>::<sym>` 访问；不在此层 re-export。
 
-#![allow(dead_code)]
-
 pub mod converter;
 pub mod delivery;
 pub mod reducer;

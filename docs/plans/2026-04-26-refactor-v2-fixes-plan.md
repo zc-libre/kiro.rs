@@ -658,10 +658,31 @@
 
 #### Phase F 检查点
 
-- [ ] `grep -rn '^#!\[allow(dead_code' src/` ≤ 2
-- [ ] `cargo clippy --all-targets -- -D warnings` 通过
-- [ ] README + CHANGELOG 均同步
-- [ ] `cargo run` 启动日志中 API Key 仅显示前 4 字符
+- [x] `grep -rn '^#!\[allow(dead_code' src/` ≤ 2（实际 0，全部清零）
+- [x] `cargo clippy --all-targets -- -D warnings` 通过
+- [x] README + CHANGELOG 均同步
+- [x] `cargo run` 启动日志中 API Key 仅显示前 4 字符（已在 Phase E 实现，main.rs:230-234）
+
+**实施备注**：
+- F4.1 已在 Phase E 完成（安全审查反馈），无需重复。
+- F1.1：18 处 `#![allow(dead_code)]` 全部移除 + 后续 dead_code 清理：
+  - 删除真 dead 的访问器：`CredentialPool::{store, state, stats, resolver}`、`CredentialPool::report_refresh_failure`、`KiroClient::{pool, endpoints}`、`EndpointRegistry::default_name`、`BalanceCacheStore::{path, ttl_secs}`、`CredentialsFileStore::path`、`StatsFileStore::path`、`Credential::default_credentials_path`、`EntryState::enabled`、`CredentialState::{ids, set_disabled_with_reason}`、`CredentialStats::from_storage`、`CredentialStore::set_endpoint`。
+  - 删除 dead trait 默认实现：`KiroEndpoint::is_monthly_request_limit / is_bearer_token_invalid` + 默认函数 + 4 个测试（YAGNI；现行 retry policy 在 `infra/http/retry.rs` 完成识别）。
+  - 删除 dead 错误变体：`KiroError::{Storage, Decode}` + `http_status_hint` + 测试。
+  - 删除 dead `AdminPoolError::InvalidMode`（`set_load_balancing_mode` 实际返回 `ProviderError::BadRequest`）。
+  - 保留：`KiroError::Endpoint` 加 `#[allow(dead_code)]` + 注释（仅在 `cfg(not(feature = "native-tls"))` 路径构造）。
+  - 标 `#[cfg(test)]`：`CredentialStats::get`、`CredentialStore::is_multiple`（仅测试访问）。
+- F2.1：`GlobalProxyConfig::to_proxy_config()` 集中后，`ProxyConfig::new(url) + with_auth` 模式从 3 处缩减到 1 处（method 内）。`infra/refresher/mod.rs`、`service/credential_pool/pool.rs`、`main.rs` 均改为单行调用。
+- F3.1：`is_token_expiring_soon`（10min 阈值）在 `prepare_token` fast path 触发 warn；`expires_at` 缺失/解析失败返回 false 避免 API Key 凭据误报。
+- 测试数变化：370 → 369（净减 1）。删除 9 个测试（dead 函数附带）+ 重命名 1 个 + 新增 8 个（to_proxy_config ×3、is_token_expiring_soon ×2、ProxyConfig 自定义 Debug ×3）。新增数接近删除数。
+
+**审查反馈处理**（code-reviewer + security-reviewer）：
+
+- [x] code-review nit：`src/interface/http/error.rs:20` 注释引用了已删除的 `KiroError::http_status_hint`，已改为"各 arm 内联指定（参见下方 match）"。
+- [x] security M1：`main.rs:140` 的 `tracing::info!("已配置 HTTP 代理: {}", p.url)` 在 `proxy_url` 内嵌 `user:password@` 时会泄露密码。修复方案：
+  - 把原 `service/credential_pool/pool.rs` 的私有 `mask_proxy_url` 提到共享位置 `infra/http/client.rs::mask_proxy_url(pub fn)`，统一脱敏逻辑。
+  - `ProxyConfig` 新增 `display_url()` 方法（脱敏 URL）；`main.rs:140` 改为 `p.display_url()`。
+- [x] security L1：`ProxyConfig` 默认 `#[derive(Debug)]` 会输出 `password: Option<String>` 明文。改为自定义 `Debug` 实现：`url` 经 `mask_proxy_url` 处理，`password` 输出 `[REDACTED]`。新增 3 个 ProxyConfig debug/display 单测。
 
 ---
 
@@ -741,5 +762,5 @@
 - [x] Phase C 完成（2026-04-26，handlers.rs 实际行数受限于 Phase D 流处理迁移，已记录在检查点）
 - [x] Phase D 完成
 - [x] Phase E 完成（2026-04-26）
-- [ ] Phase F 完成
-- [ ] Implementation complete
+- [x] Phase F 完成（2026-04-26）
+- [ ] Implementation complete（待 code review + security review）

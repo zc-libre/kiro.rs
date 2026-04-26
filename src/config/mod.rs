@@ -190,7 +190,10 @@ mod tests {
             cfg.endpoint.default_endpoint,
             back.endpoint.default_endpoint
         );
-        assert_eq!(cfg.features.extract_thinking, back.features.extract_thinking);
+        assert_eq!(
+            cfg.features.extract_thinking,
+            back.features.extract_thinking
+        );
         assert_eq!(
             cfg.features.load_balancing_mode,
             back.features.load_balancing_mode

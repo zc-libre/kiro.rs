@@ -43,10 +43,7 @@ impl TokenSource for SocialRefresher {
             .post(&url)
             .header("Accept", "application/json, text/plain, */*")
             .header("Content-Type", "application/json")
-            .header(
-                "User-Agent",
-                format!("KiroIDE-{kiro_version}-{machine_id}"),
-            )
+            .header("User-Agent", format!("KiroIDE-{kiro_version}-{machine_id}"))
             .header("Accept-Encoding", "gzip, compress, deflate, br")
             .header("host", &domain)
             .header("Connection", "close")

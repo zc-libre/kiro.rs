@@ -77,8 +77,7 @@ impl From<AdminPoolError> for AdminServiceError {
             | AdminPoolError::MissingRefreshToken
             | AdminPoolError::MissingApiKey
             | AdminPoolError::NotDisabled(_)
-            | AdminPoolError::ApiKeyNotRefreshable
-            | AdminPoolError::InvalidMode(_) => {
+            | AdminPoolError::ApiKeyNotRefreshable => {
                 AdminServiceError::InvalidCredential(e.to_string())
             }
             AdminPoolError::Refresh(_)

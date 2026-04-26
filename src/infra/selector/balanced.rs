@@ -43,7 +43,12 @@ mod tests {
         state: &'a CredentialStateView,
         stats: &'a CredentialStatsView,
     ) -> CredentialView<'a> {
-        CredentialView { id, credential: cred, state, stats }
+        CredentialView {
+            id,
+            credential: cred,
+            state,
+            stats,
+        }
     }
 
     fn enabled() -> CredentialStateView {
@@ -53,9 +58,18 @@ mod tests {
     #[test]
     fn select_returns_least_used() {
         let selector = BalancedSelector::new();
-        let c1 = Credential { priority: 0, ..Default::default() };
-        let c2 = Credential { priority: 0, ..Default::default() };
-        let c3 = Credential { priority: 0, ..Default::default() };
+        let c1 = Credential {
+            priority: 0,
+            ..Default::default()
+        };
+        let c2 = Credential {
+            priority: 0,
+            ..Default::default()
+        };
+        let c3 = Credential {
+            priority: 0,
+            ..Default::default()
+        };
         let s = enabled();
         let st1 = CredentialStatsView { success_count: 100 };
         let st2 = CredentialStatsView { success_count: 5 };
@@ -71,8 +85,14 @@ mod tests {
     #[test]
     fn select_breaks_tie_by_priority() {
         let selector = BalancedSelector::new();
-        let c1 = Credential { priority: 5, ..Default::default() };
-        let c2 = Credential { priority: 1, ..Default::default() };
+        let c1 = Credential {
+            priority: 5,
+            ..Default::default()
+        };
+        let c2 = Credential {
+            priority: 1,
+            ..Default::default()
+        };
         let s = enabled();
         let st = CredentialStatsView { success_count: 10 };
         let candidates = vec![view(1, &c1, &s, &st), view(2, &c2, &s, &st)];

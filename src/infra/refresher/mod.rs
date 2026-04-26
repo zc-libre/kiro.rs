@@ -3,8 +3,6 @@
 //! 公共纯函数（HTTP 构造、错误判定、字段提取）暴露在本模块，refresh() 主体仅做
 //! "发请求 + 调纯函数 + 装配 RefreshOutcome" 的薄壳；HTTP 端到端行为靠 Phase 8 冒烟。
 
-#![allow(dead_code)]
-
 pub mod api_key;
 pub mod idc;
 pub mod social;
@@ -21,7 +19,7 @@ use crate::config::Config;
 use crate::domain::credential::Credential;
 use crate::domain::error::{KiroError, RefreshError};
 use crate::domain::token::RefreshOutcome;
-use crate::infra::http::client::{ProxyConfig, build_client};
+use crate::infra::http::client::build_client;
 
 /// 把上游 refresh 端点的非 2xx HTTP 状态映射到 RefreshError
 ///
@@ -110,15 +108,7 @@ pub(crate) fn build_refresh_client(
     cred: &Credential,
     config: &Config,
 ) -> Result<reqwest::Client, RefreshError> {
-    let global_proxy = config.proxy.proxy_url.as_deref().map(|url| {
-        let mut p = ProxyConfig::new(url);
-        if let (Some(u), Some(pw)) =
-            (&config.proxy.proxy_username, &config.proxy.proxy_password)
-        {
-            p = p.with_auth(u, pw);
-        }
-        p
-    });
+    let global_proxy = config.proxy.to_proxy_config();
     let effective_proxy = cred.effective_proxy(global_proxy.as_ref());
     build_client(effective_proxy.as_ref(), 60, config.net.tls_backend).map_err(|e| match e {
         KiroError::Network(re) => RefreshError::Network(re),
@@ -132,7 +122,8 @@ mod tests {
 
     #[test]
     fn classify_400_with_invalid_grant_is_token_invalid() {
-        let body = r#"{"error":"invalid_grant","error_description":"Invalid refresh token provided"}"#;
+        let body =
+            r#"{"error":"invalid_grant","error_description":"Invalid refresh token provided"}"#;
         assert!(matches!(
             classify_refresh_http_error(StatusCode::BAD_REQUEST, body),
             RefreshError::TokenInvalid

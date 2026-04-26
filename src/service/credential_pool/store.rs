@@ -123,6 +123,7 @@ impl CredentialStore {
         Ok((store, issues))
     }
 
+    #[cfg(test)]
     pub fn is_multiple(&self) -> bool {
         self.is_multiple
     }
@@ -214,23 +215,6 @@ impl CredentialStore {
         Ok(updated)
     }
 
-    pub fn set_endpoint(&self, id: u64, endpoint: Option<String>) -> Result<bool, ConfigError> {
-        let updated = {
-            let mut map = self.inner.lock();
-            match map.get_mut(&id) {
-                Some(c) => {
-                    c.endpoint = endpoint;
-                    true
-                }
-                None => false,
-            }
-        };
-        if updated {
-            self.persist()?;
-        }
-        Ok(updated)
-    }
-
     /// 同步 disabled 字段到文件并回写（仅多格式）
     pub fn set_disabled(&self, id: u64, disabled: bool) -> Result<bool, ConfigError> {
         let updated = {
@@ -277,7 +261,10 @@ mod tests {
         std::env::temp_dir().join(format!("kiro-rs-store-test-{tag}-{id}.json"))
     }
 
-    fn make_store_from(content: &str, tag: &str) -> (CredentialStore, Vec<ValidationIssue>, PathBuf) {
+    fn make_store_from(
+        content: &str,
+        tag: &str,
+    ) -> (CredentialStore, Vec<ValidationIssue>, PathBuf) {
         let path = tmp_path(tag);
         fs::write(&path, content).unwrap();
         let file = Arc::new(CredentialsFileStore::new(Some(path.clone())));
@@ -317,9 +304,12 @@ mod tests {
 
         // 从同一 path 重新加载，确保 5 条
         let file2 = Arc::new(CredentialsFileStore::new(Some(path.clone())));
-        let (store2, _) =
-            CredentialStore::load(file2, Arc::new(Config::default()), Arc::new(MachineIdResolver::new()))
-                .unwrap();
+        let (store2, _) = CredentialStore::load(
+            file2,
+            Arc::new(Config::default()),
+            Arc::new(MachineIdResolver::new()),
+        )
+        .unwrap();
         assert_eq!(store2.count(), initial + 1);
         let _ = fs::remove_file(&path);
     }
@@ -369,7 +359,13 @@ mod tests {
         let _ = fs::remove_file(&path);
     }
 
-    fn try_load_from(content: &str, tag: &str) -> (Result<(CredentialStore, Vec<ValidationIssue>), ConfigError>, PathBuf) {
+    fn try_load_from(
+        content: &str,
+        tag: &str,
+    ) -> (
+        Result<(CredentialStore, Vec<ValidationIssue>), ConfigError>,
+        PathBuf,
+    ) {
         let path = tmp_path(tag);
         fs::write(&path, content).unwrap();
         let file = Arc::new(CredentialsFileStore::new(Some(path.clone())));
@@ -388,7 +384,10 @@ mod tests {
         let (res, path) = try_load_from(json, "dup-id");
         match res {
             Err(ConfigError::Validation(msg)) => {
-                assert!(msg.contains("重复 id 1"), "expected message to contain 重复 id 1, got: {msg}");
+                assert!(
+                    msg.contains("重复 id 1"),
+                    "expected message to contain 重复 id 1, got: {msg}"
+                );
             }
             Err(other) => panic!("expected ConfigError::Validation, got {other:?}"),
             Ok(_) => panic!("expected ConfigError::Validation, got Ok"),

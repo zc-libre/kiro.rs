@@ -24,10 +24,6 @@ impl StatsFileStore {
         Self { path }
     }
 
-    pub fn path(&self) -> Option<&PathBuf> {
-        self.path.as_ref()
-    }
-
     /// 加载所有统计；文件不存在或解析失败返回空 map
     pub fn load(&self) -> HashMap<u64, StatsEntry> {
         let path = match &self.path {

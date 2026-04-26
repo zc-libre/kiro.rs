@@ -17,7 +17,7 @@ const UPSTREAM_BODY_MAX_BYTES: usize = 512;
 /// 把 KiroError 映射为 Anthropic 兼容的错误响应。
 ///
 /// 字段名 `error.type` / `error.message` 与 master 历史响应保持一致。
-/// 状态码与 `KiroError::http_status_hint` 同源。
+/// 状态码各 arm 内联指定（参见下方 match）。
 ///
 /// 对每个 arm 同步写入 tracing：
 /// - 客户端可重试/可纠正的 4xx → `warn!`
@@ -51,11 +51,7 @@ pub fn kiro_error_response(err: &KiroError) -> Response {
         }
         KiroError::Provider(ProviderError::EndpointResolution(msg)) => {
             tracing::error!(error = %err, "endpoint 解析失败");
-            (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "api_error",
-                msg.clone(),
-            )
+            (StatusCode::SERVICE_UNAVAILABLE, "api_error", msg.clone())
         }
         KiroError::Provider(ProviderError::AllCredentialsExhausted { available, total }) => {
             tracing::error!(error = %err, available, total, "所有凭据都已耗尽");
@@ -171,7 +167,8 @@ mod tests {
 
     #[tokio::test]
     async fn kiro_error_into_response_endpoint_resolution_503() {
-        let err: KiroError = ProviderError::EndpointResolution("ide endpoint missing".into()).into();
+        let err: KiroError =
+            ProviderError::EndpointResolution("ide endpoint missing".into()).into();
         let (status, json) = body_json(kiro_error_response(&err)).await;
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(json["error"]["type"], "api_error");
@@ -224,7 +221,11 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         let msg = json["error"]["message"].as_str().unwrap();
         // 截断到 512 字节加少量包装；原 body 2048，结果 message 长度应远小于 2048
-        assert!(msg.len() < body.len(), "expect truncation; got len={}", msg.len());
+        assert!(
+            msg.len() < body.len(),
+            "expect truncation; got len={}",
+            msg.len()
+        );
     }
 
     #[tokio::test]

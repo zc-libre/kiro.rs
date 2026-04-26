@@ -21,10 +21,6 @@ pub struct EntryState {
 }
 
 impl EntryState {
-    pub fn enabled() -> Self {
-        Self::default()
-    }
-
     pub fn disabled_with(reason: DisabledReason) -> Self {
         Self {
             disabled: true,
@@ -59,10 +55,6 @@ impl CredentialState {
 
     pub fn snapshot(&self) -> HashMap<u64, EntryState> {
         self.entries.lock().clone()
-    }
-
-    pub fn ids(&self) -> Vec<u64> {
-        self.entries.lock().keys().copied().collect()
     }
 
     /// 报告一次成功：failure_count = 0, refresh_failure_count = 0
@@ -138,14 +130,6 @@ impl CredentialState {
         }
     }
 
-    /// 设置带原因的禁用（如 InvalidConfig）
-    pub fn set_disabled_with_reason(&self, id: u64, reason: DisabledReason) {
-        let mut entries = self.entries.lock();
-        let entry = entries.entry(id).or_default();
-        entry.disabled = true;
-        entry.disabled_reason = Some(reason);
-    }
-
     /// 自愈：把所有 disabled_reason == TooManyFailures 的条目重置
     /// 返回 true 表示至少一条被自愈
     ///
@@ -155,9 +139,7 @@ impl CredentialState {
         let mut entries = self.entries.lock();
         let mut healed = false;
         for entry in entries.values_mut() {
-            if entry.disabled
-                && entry.disabled_reason == Some(DisabledReason::TooManyFailures)
-            {
+            if entry.disabled && entry.disabled_reason == Some(DisabledReason::TooManyFailures) {
                 entry.disabled = false;
                 entry.disabled_reason = None;
                 entry.failure_count = 0;
@@ -275,15 +257,6 @@ mod tests {
     }
 
     #[test]
-    fn set_disabled_with_reason_invalid_config() {
-        let state = CredentialState::new();
-        state.set_disabled_with_reason(7, DisabledReason::InvalidConfig);
-        let s = state.get(7).unwrap();
-        assert!(s.disabled);
-        assert_eq!(s.disabled_reason, Some(DisabledReason::InvalidConfig));
-    }
-
-    #[test]
     fn heal_returns_false_when_nothing_to_heal() {
         let state = CredentialState::new();
         ensure_entry(&state, 1);
@@ -341,6 +314,9 @@ mod tests {
         assert!(!healed, "TooManyRefreshFailures 不参与自愈");
         let s = state.get(1).unwrap();
         assert!(s.disabled);
-        assert_eq!(s.disabled_reason, Some(DisabledReason::TooManyRefreshFailures));
+        assert_eq!(
+            s.disabled_reason,
+            Some(DisabledReason::TooManyRefreshFailures)
+        );
     }
 }

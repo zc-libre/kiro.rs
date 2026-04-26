@@ -240,10 +240,7 @@ fn generate_websearch_events(
     input_tokens: i32,
 ) -> Vec<SseEvent> {
     let mut events = Vec::new();
-    let message_id = format!(
-        "msg_{}",
-        &Uuid::new_v4().to_string().replace('-', "")[..24]
-    );
+    let message_id = format!("msg_{}", &Uuid::new_v4().to_string().replace('-', "")[..24]);
 
     // 1. message_start
     events.push(SseEvent::new(
@@ -534,10 +531,13 @@ async fn call_mcp_api(
     // status: 0 是 plan 指定的 sentinel，表示"上游连接成功但读取 body 失败"——
     // 这种情况下没有真正的 HTTP status，但需要复用 ProviderError::UpstreamHttp
     // 以便经过统一的 kiro_error_response 映射为 502。
-    let body = response.text().await.map_err(|e| ProviderError::UpstreamHttp {
-        status: 0,
-        body: format!("MCP read body: {e}"),
-    })?;
+    let body = response
+        .text()
+        .await
+        .map_err(|e| ProviderError::UpstreamHttp {
+            status: 0,
+            body: format!("MCP read body: {e}"),
+        })?;
     tracing::debug!("MCP response: {}", body);
 
     parse_mcp_response_body(&body)

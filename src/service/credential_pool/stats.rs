@@ -41,16 +41,6 @@ impl CredentialStats {
         Self::default()
     }
 
-    pub fn from_storage(loaded: HashMap<u64, StatsEntry>) -> Self {
-        let entries = loaded
-            .into_iter()
-            .map(|(id, s)| (id, EntryStats::from_storage(s)))
-            .collect();
-        Self {
-            entries: Mutex::new(entries),
-        }
-    }
-
     pub fn upsert(&self, id: u64, stats: EntryStats) {
         self.entries.lock().insert(id, stats);
     }
@@ -59,6 +49,7 @@ impl CredentialStats {
         self.entries.lock().remove(&id);
     }
 
+    #[cfg(test)]
     pub fn get(&self, id: u64) -> Option<EntryStats> {
         self.entries.lock().get(&id).cloned()
     }
@@ -121,16 +112,15 @@ mod tests {
     }
 
     #[test]
-    fn from_storage_roundtrip_via_to_storage_map() {
-        let mut loaded = HashMap::new();
-        loaded.insert(
+    fn upsert_then_to_storage_map_round_trip() {
+        let stats = CredentialStats::new();
+        stats.upsert(
             5,
-            StatsEntry {
+            EntryStats {
                 success_count: 42,
                 last_used_at: Some("2026-04-25T00:00:00Z".into()),
             },
         );
-        let stats = CredentialStats::from_storage(loaded);
         let map = stats.to_storage_map();
         assert_eq!(map.get(&5).unwrap().success_count, 42);
     }

@@ -112,10 +112,11 @@ impl AdminService {
     /// 获取凭据余额（带 5 分钟缓存）
     pub async fn get_balance(&self, id: u64) -> Result<BalanceResponse, AdminServiceError> {
         if let Some(cached) = self.balance_cache.get(id)
-            && let Ok(balance) = serde_json::from_value::<BalanceResponse>(cached) {
-                tracing::debug!("凭据 #{} 余额命中缓存", id);
-                return Ok(balance);
-            }
+            && let Ok(balance) = serde_json::from_value::<BalanceResponse>(cached)
+        {
+            tracing::debug!("凭据 #{} 余额命中缓存", id);
+            return Ok(balance);
+        }
 
         let usage = self.pool.get_usage_limits_for(id).await?;
 
@@ -293,4 +294,3 @@ mod tests {
         }
     }
 }
-

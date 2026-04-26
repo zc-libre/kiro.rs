@@ -2,8 +2,6 @@
 //!
 //! Phase 2.11-2.12 实现 state + stats；Phase 2.13 实现 store；Phase 2.14 实现 pool 门面。
 
-#![allow(dead_code)]
-
 pub mod admin;
 pub mod pool;
 pub mod state;

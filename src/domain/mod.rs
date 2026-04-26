@@ -2,8 +2,6 @@
 //!
 //! Phase 1 阶段为占位，真实实现见 Phase 2-4。
 
-#![allow(dead_code)]
-
 pub mod credential;
 pub mod endpoint;
 pub mod error;

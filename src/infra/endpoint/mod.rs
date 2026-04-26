@@ -1,7 +1,5 @@
 //! Kiro 端点实现 + 注册表
 
-#![allow(dead_code)]
-
 pub mod ide;
 
 pub use ide::IdeEndpoint;
@@ -38,10 +36,6 @@ impl EndpointRegistry {
         })
     }
 
-    pub fn default_name(&self) -> &str {
-        &self.default_endpoint
-    }
-
     pub fn names(&self) -> Vec<String> {
         self.endpoints.keys().cloned().collect()
     }
@@ -52,13 +46,11 @@ impl EndpointRegistry {
 
     /// 凭据 endpoint 字段命中 → 返回对应实现；缺失 → fallback default；未注册 → ProviderError::EndpointResolution
     pub fn resolve_for(&self, cred: &Credential) -> Result<Arc<dyn KiroEndpoint>, ProviderError> {
-        let name = cred
-            .endpoint
-            .as_deref()
-            .unwrap_or(&self.default_endpoint);
-        self.endpoints.get(name).cloned().ok_or_else(|| {
-            ProviderError::EndpointResolution(format!("unknown endpoint: {name}"))
-        })
+        let name = cred.endpoint.as_deref().unwrap_or(&self.default_endpoint);
+        self.endpoints
+            .get(name)
+            .cloned()
+            .ok_or_else(|| ProviderError::EndpointResolution(format!("unknown endpoint: {name}")))
     }
 }
 

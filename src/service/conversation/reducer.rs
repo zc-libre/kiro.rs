@@ -309,7 +309,10 @@ mod tests {
         let first = manager.handle_message_start(json!({"type": "message_start"}));
         assert!(first.is_some(), "first message_start should be emitted");
         let second = manager.handle_message_start(json!({"type": "message_start"}));
-        assert!(second.is_none(), "duplicate message_start should be skipped");
+        assert!(
+            second.is_none(),
+            "duplicate message_start should be skipped"
+        );
     }
 
     #[test]

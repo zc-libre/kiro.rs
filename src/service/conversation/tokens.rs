@@ -27,7 +27,7 @@ pub fn count_tokens(text: &str) -> u64 {
         .map(|c| if is_non_western_char(c) { 4.0 } else { 1.0 })
         .sum();
     let tokens = char_units / 4.0;
-    
+
     (if tokens < 100.0 {
         tokens * 1.5
     } else if tokens < 200.0 {
@@ -89,10 +89,11 @@ pub fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
             total += count_tokens(text) as i32;
         }
         if block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-            && let Some(input) = block.get("input") {
-                let input_str = serde_json::to_string(input).unwrap_or_default();
-                total += count_tokens(&input_str) as i32;
-            }
+            && let Some(input) = block.get("input")
+        {
+            let input_str = serde_json::to_string(input).unwrap_or_default();
+            total += count_tokens(&input_str) as i32;
+        }
     }
     total.max(1)
 }

@@ -154,7 +154,10 @@ mod tests {
         // flush 后 pending 已 reset，下一次 record 应能再次 spawn 定时器
         persister.record();
         tokio::time::sleep(Duration::from_millis(180)).await;
-        assert!(path.exists(), "flush 后 pending 应已 reset，新窗口的定时器应能落盘");
+        assert!(
+            path.exists(),
+            "flush 后 pending 应已 reset，新窗口的定时器应能落盘"
+        );
 
         let _ = std::fs::remove_file(&path);
     }

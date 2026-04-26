@@ -172,10 +172,7 @@ mod tests {
         for s in [408u16, 429, 500, 502, 503, 504] {
             let status = StatusCode::from_u16(s).unwrap();
             assert!(
-                matches!(
-                    policy().decide(status, "", 0),
-                    RetryDecision::Retry { .. }
-                ),
+                matches!(policy().decide(status, "", 0), RetryDecision::Retry { .. }),
                 "status {s} 应返回 Retry"
             );
         }

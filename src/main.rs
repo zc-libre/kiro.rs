@@ -15,7 +15,6 @@ use crate::domain::credential::Credential;
 use crate::domain::endpoint::KiroEndpoint;
 use crate::domain::retry::RetryPolicy;
 use crate::infra::endpoint::{EndpointRegistry, IdeEndpoint};
-use crate::infra::http::client::ProxyConfig;
 use crate::infra::http::executor::RequestExecutor;
 use crate::infra::http::retry::DefaultRetryPolicy;
 use crate::infra::machine_id::MachineIdResolver;
@@ -24,11 +23,11 @@ use crate::interface::cli::Args;
 use crate::interface::http::admin as http_admin;
 use crate::interface::http::anthropic as http_anthropic;
 use crate::interface::http::ui as http_ui;
+use crate::service::KiroClient;
 use crate::service::admin::AdminService;
 use crate::service::credential_pool::{
     CredentialPool, CredentialState, CredentialStats, CredentialStore, EntryStats,
 };
-use crate::service::KiroClient;
 
 const DEFAULT_CREDENTIALS_PATH: &str = "credentials.json";
 
@@ -136,18 +135,10 @@ async fn main() {
     });
 
     // ====== 全局代理配置 ======
-    let global_proxy = config.proxy.proxy_url.as_deref().map(|url| {
-        let mut p = ProxyConfig::new(url);
-        if let (Some(u), Some(pw)) = (
-            &config.proxy.proxy_username,
-            &config.proxy.proxy_password,
-        ) {
-            p = p.with_auth(u, pw);
-        }
-        p
-    });
+    let global_proxy = config.proxy.to_proxy_config();
     if let Some(p) = &global_proxy {
-        tracing::info!("已配置 HTTP 代理: {}", p.url);
+        // 使用 display_url() 脱敏 URL 中可能内嵌的 user:password@ 凭据
+        tracing::info!("已配置 HTTP 代理: {}", p.display_url());
     }
 
     // ====== 端点注册表 ======

@@ -1,7 +1,5 @@
 //! CredentialSelector trait + CredentialView（占位，Phase 2 实现 Priority/Balanced）
 
-#![allow(dead_code)]
-
 use crate::domain::credential::Credential;
 
 /// 凭据状态只读视图（Phase 2 由 service::credential_pool::state 拼装）

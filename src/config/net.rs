@@ -11,7 +11,6 @@ pub enum TlsBackend {
     NativeTls,
 }
 
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetConfig {

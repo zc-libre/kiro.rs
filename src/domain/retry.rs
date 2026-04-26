@@ -1,7 +1,5 @@
 //! RetryPolicy + RetryDecision（占位，Phase 3 实现 DefaultRetryPolicy）
 
-#![allow(dead_code)]
-
 use std::time::Duration;
 
 use http::StatusCode;

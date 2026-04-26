@@ -1,7 +1,5 @@
 //! TokenSource trait（占位，Phase 2 实现 Social/Idc/ApiKey 三种）
 
-#![allow(dead_code)]
-
 use futures::future::BoxFuture;
 
 use crate::domain::credential::Credential;

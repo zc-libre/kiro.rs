@@ -59,16 +59,14 @@ pub enum KiroError {
     Refresh(#[from] RefreshError),
     #[error("provider: {0}")]
     Provider(#[from] ProviderError),
+    /// 仅在 `--no-default-features`（关闭 native-tls）的构建路径上由 `infra/http/client` 构造。
+    #[allow(dead_code)]
     #[error("endpoint: {0}")]
     Endpoint(String),
     #[error("network: {0}")]
     Network(#[from] reqwest::Error),
     #[error("config: {0}")]
     Config(#[from] ConfigError),
-    #[error("storage: {0}")]
-    Storage(std::io::Error),
-    #[error("decode: {0}")]
-    Decode(String),
 }
 
 impl KiroError {
@@ -80,24 +78,6 @@ impl KiroError {
             KiroError::Endpoint(_) => "endpoint",
             KiroError::Network(_) => "network",
             KiroError::Config(_) => "config",
-            KiroError::Storage(_) => "storage",
-            KiroError::Decode(_) => "decode",
-        }
-    }
-
-    pub fn http_status_hint(&self) -> StatusCode {
-        match self {
-            KiroError::Provider(ProviderError::ContextWindowFull) => StatusCode::BAD_REQUEST,
-            KiroError::Provider(ProviderError::InputTooLong) => StatusCode::BAD_REQUEST,
-            KiroError::Provider(ProviderError::BadRequest(_)) => StatusCode::BAD_REQUEST,
-            KiroError::Provider(ProviderError::EndpointResolution(_)) => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
-            KiroError::Provider(ProviderError::AllCredentialsExhausted { .. }) => {
-                StatusCode::BAD_GATEWAY
-            }
-            KiroError::Refresh(RefreshError::TokenInvalid) => StatusCode::BAD_GATEWAY,
-            _ => StatusCode::BAD_GATEWAY,
         }
     }
 }
@@ -150,23 +130,5 @@ mod tests {
     fn from_reqwest_error_to_kiro_error_compiles() {
         fn assert_from<T, U: From<T>>() {}
         assert_from::<reqwest::Error, KiroError>();
-    }
-
-    #[test]
-    fn http_status_hint_context_window_full_is_400() {
-        let e: KiroError = ProviderError::ContextWindowFull.into();
-        assert_eq!(e.http_status_hint(), StatusCode::BAD_REQUEST);
-    }
-
-    #[test]
-    fn http_status_hint_endpoint_resolution_is_503() {
-        let e: KiroError = ProviderError::EndpointResolution("ide".into()).into();
-        assert_eq!(e.http_status_hint(), StatusCode::SERVICE_UNAVAILABLE);
-    }
-
-    #[test]
-    fn http_status_hint_default_is_502() {
-        let e = KiroError::Endpoint("oops".into());
-        assert_eq!(e.http_status_hint(), StatusCode::BAD_GATEWAY);
     }
 }

@@ -39,7 +39,12 @@ mod tests {
         state: &'a CredentialStateView,
         stats: &'a CredentialStatsView,
     ) -> CredentialView<'a> {
-        CredentialView { id, credential: cred, state, stats }
+        CredentialView {
+            id,
+            credential: cred,
+            state,
+            stats,
+        }
     }
 
     fn enabled() -> CredentialStateView {
@@ -59,9 +64,18 @@ mod tests {
     #[test]
     fn select_returns_lowest_priority() {
         let selector = PrioritySelector::new();
-        let c1 = Credential { priority: 5, ..Default::default() };
-        let c2 = Credential { priority: 1, ..Default::default() };
-        let c3 = Credential { priority: 3, ..Default::default() };
+        let c1 = Credential {
+            priority: 5,
+            ..Default::default()
+        };
+        let c2 = Credential {
+            priority: 1,
+            ..Default::default()
+        };
+        let c3 = Credential {
+            priority: 3,
+            ..Default::default()
+        };
         let s = enabled();
         let st = stats(0);
         let candidates = vec![
@@ -96,21 +110,39 @@ mod tests {
             "opus 模型必须跳过 free 凭据"
         );
         // 非 opus 模型不过滤
-        assert_eq!(selector.select(&candidates, Some("claude-sonnet-4-6")), Some(1));
+        assert_eq!(
+            selector.select(&candidates, Some("claude-sonnet-4-6")),
+            Some(1)
+        );
     }
 
     #[test]
     fn select_with_tied_priorities_picks_lowest_id_regardless_of_input_order() {
         let selector = PrioritySelector::new();
-        let c = Credential { priority: 1, ..Default::default() };
+        let c = Credential {
+            priority: 1,
+            ..Default::default()
+        };
         let s = enabled();
         let st = stats(0);
 
         // 三种不同输入顺序，期望 id=10 始终被选（最低 id 优先）
         let permutations = [
-            vec![view(10, &c, &s, &st), view(20, &c, &s, &st), view(30, &c, &s, &st)],
-            vec![view(30, &c, &s, &st), view(10, &c, &s, &st), view(20, &c, &s, &st)],
-            vec![view(20, &c, &s, &st), view(30, &c, &s, &st), view(10, &c, &s, &st)],
+            vec![
+                view(10, &c, &s, &st),
+                view(20, &c, &s, &st),
+                view(30, &c, &s, &st),
+            ],
+            vec![
+                view(30, &c, &s, &st),
+                view(10, &c, &s, &st),
+                view(20, &c, &s, &st),
+            ],
+            vec![
+                view(20, &c, &s, &st),
+                view(30, &c, &s, &st),
+                view(10, &c, &s, &st),
+            ],
         ];
         for cands in permutations {
             assert_eq!(

@@ -121,9 +121,10 @@ impl UsageLimitsResponse {
         };
         let mut total = breakdown.usage_limit_with_precision;
         if let Some(trial) = &breakdown.free_trial_info
-            && trial.is_active() {
-                total += trial.usage_limit_with_precision;
-            }
+            && trial.is_active()
+        {
+            total += trial.usage_limit_with_precision;
+        }
         for bonus in &breakdown.bonuses {
             if bonus.is_active() {
                 total += bonus.usage_limit;
@@ -138,9 +139,10 @@ impl UsageLimitsResponse {
         };
         let mut total = breakdown.current_usage_with_precision;
         if let Some(trial) = &breakdown.free_trial_info
-            && trial.is_active() {
-                total += trial.current_usage_with_precision;
-            }
+            && trial.is_active()
+        {
+            total += trial.current_usage_with_precision;
+        }
         for bonus in &breakdown.bonuses {
             if bonus.is_active() {
                 total += bonus.current_usage;

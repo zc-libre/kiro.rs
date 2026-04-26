@@ -153,9 +153,8 @@ impl StreamContext {
             Event::ToolUse(tool_use) => self.process_tool_use(tool_use),
             Event::ContextUsage(context_usage) => {
                 let window_size = get_context_window_size(&self.model);
-                let actual_input_tokens = (context_usage.context_usage_percentage
-                    * (window_size as f64)
-                    / 100.0) as i32;
+                let actual_input_tokens =
+                    (context_usage.context_usage_percentage * (window_size as f64) / 100.0) as i32;
                 self.context_input_tokens = Some(actual_input_tokens);
                 if context_usage.context_usage_percentage >= 100.0 {
                     self.state_manager
@@ -276,11 +275,12 @@ impl StreamContext {
                 if let Some(end_pos) = find_real_thinking_end_tag(&self.thinking_buffer) {
                     let thinking_content = self.thinking_buffer[..end_pos].to_string();
                     if !thinking_content.is_empty()
-                        && let Some(thinking_index) = self.thinking_block_index {
-                            events.push(
-                                self.create_thinking_delta_event(thinking_index, &thinking_content),
-                            );
-                        }
+                        && let Some(thinking_index) = self.thinking_block_index
+                    {
+                        events.push(
+                            self.create_thinking_delta_event(thinking_index, &thinking_content),
+                        );
+                    }
 
                     self.in_thinking_block = false;
                     self.thinking_extracted = true;
@@ -313,11 +313,12 @@ impl StreamContext {
                     if safe_len > 0 {
                         let safe_content = self.thinking_buffer[..safe_len].to_string();
                         if !safe_content.is_empty()
-                            && let Some(thinking_index) = self.thinking_block_index {
-                                events.push(
-                                    self.create_thinking_delta_event(thinking_index, &safe_content),
-                                );
-                            }
+                            && let Some(thinking_index) = self.thinking_block_index
+                        {
+                            events.push(
+                                self.create_thinking_delta_event(thinking_index, &safe_content),
+                            );
+                        }
                         self.thinking_buffer = self.thinking_buffer[safe_len..].to_string();
                     }
                     break;
@@ -346,9 +347,10 @@ impl StreamContext {
         // 如果当前 text_block_index 指向的块已经被关闭（例如 tool_use 开始时自动 stop），
         // 则丢弃该索引并创建新的文本块继续输出，避免 delta 被状态机拒绝导致“吞字”。
         if let Some(idx) = self.text_block_index
-            && !self.state_manager.is_block_open_of_type(idx, "text") {
-                self.text_block_index = None;
-            }
+            && !self.state_manager.is_block_open_of_type(idx, "text")
+        {
+            self.text_block_index = None;
+        }
 
         let text_index = if let Some(idx) = self.text_block_index {
             idx
@@ -405,10 +407,7 @@ impl StreamContext {
     }
 
     /// 处理工具使用事件
-    fn process_tool_use(
-        &mut self,
-        tool_use: &crate::domain::event::ToolUseEvent,
-    ) -> Vec<SseEvent> {
+    fn process_tool_use(&mut self, tool_use: &crate::domain::event::ToolUseEvent) -> Vec<SseEvent> {
         let mut events = Vec::new();
 
         self.state_manager.set_has_tool_use(true);
@@ -417,35 +416,36 @@ impl StreamContext {
         // 但当 `</thinking>` 后面没有 `\n\n`（例如紧跟 tool_use 或流结束）时，
         // thinking 结束标签会滞留在 thinking_buffer，导致后续 flush 时把 `</thinking>` 当作内容输出。
         // 这里在开始 tool_use block 前做一次“边界场景”的结束标签识别与过滤。
-        if self.thinking_enabled && self.in_thinking_block
-            && let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(&self.thinking_buffer) {
-                let thinking_content = self.thinking_buffer[..end_pos].to_string();
-                if !thinking_content.is_empty()
-                    && let Some(thinking_index) = self.thinking_block_index {
-                        events.push(
-                            self.create_thinking_delta_event(thinking_index, &thinking_content),
-                        );
-                    }
+        if self.thinking_enabled
+            && self.in_thinking_block
+            && let Some(end_pos) = find_real_thinking_end_tag_at_buffer_end(&self.thinking_buffer)
+        {
+            let thinking_content = self.thinking_buffer[..end_pos].to_string();
+            if !thinking_content.is_empty()
+                && let Some(thinking_index) = self.thinking_block_index
+            {
+                events.push(self.create_thinking_delta_event(thinking_index, &thinking_content));
+            }
 
-                self.in_thinking_block = false;
-                self.thinking_extracted = true;
+            self.in_thinking_block = false;
+            self.thinking_extracted = true;
 
-                if let Some(thinking_index) = self.thinking_block_index {
-                    events.push(self.create_thinking_delta_event(thinking_index, ""));
-                    if let Some(stop_event) =
-                        self.state_manager.handle_content_block_stop(thinking_index)
-                    {
-                        events.push(stop_event);
-                    }
-                }
-
-                let after_pos = end_pos + "</thinking>".len();
-                let remaining = self.thinking_buffer[after_pos..].trim_start().to_string();
-                self.thinking_buffer.clear();
-                if !remaining.is_empty() {
-                    events.extend(self.create_text_delta_events(&remaining));
+            if let Some(thinking_index) = self.thinking_block_index {
+                events.push(self.create_thinking_delta_event(thinking_index, ""));
+                if let Some(stop_event) =
+                    self.state_manager.handle_content_block_stop(thinking_index)
+                {
+                    events.push(stop_event);
                 }
             }
+
+            let after_pos = end_pos + "</thinking>".len();
+            let remaining = self.thinking_buffer[after_pos..].trim_start().to_string();
+            self.thinking_buffer.clear();
+            if !remaining.is_empty() {
+                events.extend(self.create_text_delta_events(&remaining));
+            }
+        }
 
         // thinking 模式下，process_content_with_thinking 可能会为了探测 `<thinking>` 而暂存一小段尾部文本。
         // 如果此时直接开始 tool_use，状态机会自动关闭 text block，导致这段"待输出文本"看起来被 tool_use 吞掉。
@@ -510,9 +510,10 @@ impl StreamContext {
         }
 
         if tool_use.stop
-            && let Some(stop_event) = self.state_manager.handle_content_block_stop(block_index) {
-                events.push(stop_event);
-            }
+            && let Some(stop_event) = self.state_manager.handle_content_block_stop(block_index)
+        {
+            events.push(stop_event);
+        }
 
         events
     }
@@ -530,11 +531,12 @@ impl StreamContext {
                 {
                     let thinking_content = self.thinking_buffer[..end_pos].to_string();
                     if !thinking_content.is_empty()
-                        && let Some(thinking_index) = self.thinking_block_index {
-                            events.push(
-                                self.create_thinking_delta_event(thinking_index, &thinking_content),
-                            );
-                        }
+                        && let Some(thinking_index) = self.thinking_block_index
+                    {
+                        events.push(
+                            self.create_thinking_delta_event(thinking_index, &thinking_content),
+                        );
+                    }
 
                     if let Some(thinking_index) = self.thinking_block_index {
                         events.push(self.create_thinking_delta_event(thinking_index, ""));
@@ -625,8 +627,12 @@ impl BufferedStreamContext {
         thinking_enabled: bool,
         tool_name_map: HashMap<String, String>,
     ) -> Self {
-        let inner =
-            StreamContext::new_with_thinking(model, estimated_input_tokens, thinking_enabled, tool_name_map);
+        let inner = StreamContext::new_with_thinking(
+            model,
+            estimated_input_tokens,
+            thinking_enabled,
+            tool_name_map,
+        );
         Self {
             inner,
             event_buffer: Vec::new(),
@@ -671,9 +677,10 @@ impl BufferedStreamContext {
         for event in &mut self.event_buffer {
             if event.event == "message_start"
                 && let Some(message) = event.data.get_mut("message")
-                    && let Some(usage) = message.get_mut("usage") {
-                        usage["input_tokens"] = serde_json::json!(final_input_tokens);
-                    }
+                && let Some(usage) = message.get_mut("usage")
+            {
+                usage["input_tokens"] = serde_json::json!(final_input_tokens);
+            }
         }
 
         std::mem::take(&mut self.event_buffer)
@@ -754,7 +761,10 @@ mod tests {
         use crate::domain::event::ToolUseEvent;
 
         let mut map = HashMap::new();
-        map.insert("short_abc12345".to_string(), "mcp__very_long_original_tool_name".to_string());
+        map.insert(
+            "short_abc12345".to_string(),
+            "mcp__very_long_original_tool_name".to_string(),
+        );
 
         let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, map);
         let _ = ctx.generate_initial_events();
@@ -768,10 +778,12 @@ mod tests {
 
         let events = ctx.process_kiro_event(&tool_event);
 
-        let start_event = events.iter().find(|e| e.event == "content_block_start").unwrap();
+        let start_event = events
+            .iter()
+            .find(|e| e.event == "content_block_start")
+            .unwrap();
         assert_eq!(
-            start_event.data["content_block"]["name"],
-            "mcp__very_long_original_tool_name",
+            start_event.data["content_block"]["name"], "mcp__very_long_original_tool_name",
             "应还原为原始工具名称"
         );
     }
@@ -1056,7 +1068,12 @@ mod tests {
 
         let full_thinking: String = thinking_deltas
             .iter()
-            .filter(|e| !e.data["delta"]["thinking"].as_str().unwrap_or("").is_empty())
+            .filter(|e| {
+                !e.data["delta"]["thinking"]
+                    .as_str()
+                    .unwrap_or("")
+                    .is_empty()
+            })
             .map(|e| e.data["delta"]["thinking"].as_str().unwrap_or(""))
             .collect();
 
@@ -1068,14 +1085,11 @@ mod tests {
         let mut ctx = StreamContext::new_with_thinking("test-model", 1, true, HashMap::new());
         let _initial_events = ctx.generate_initial_events();
 
-        let events =
-            ctx.process_assistant_response("<thinking>\nabc</thinking>\n\n你好");
+        let events = ctx.process_assistant_response("<thinking>\nabc</thinking>\n\n你好");
 
         let text_deltas: Vec<_> = events
             .iter()
-            .filter(|e| {
-                e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta"
-            })
+            .filter(|e| e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta")
             .collect();
 
         let full_text: String = text_deltas
@@ -1105,9 +1119,7 @@ mod tests {
     fn collect_text_content(events: &[SseEvent]) -> String {
         events
             .iter()
-            .filter(|e| {
-                e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta"
-            })
+            .filter(|e| e.event == "content_block_delta" && e.data["delta"]["type"] == "text_delta")
             .map(|e| e.data["delta"]["text"].as_str().unwrap_or(""))
             .collect()
     }
@@ -1124,7 +1136,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "abc", "thinking should be 'abc', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "abc",
+            "thinking should be 'abc', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "你好", "text should be '你好', got: {:?}", text);
@@ -1141,7 +1157,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "abc", "thinking should be 'abc', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "abc",
+            "thinking should be 'abc', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "你好", "text should be '你好', got: {:?}", text);
@@ -1160,7 +1180,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "abc", "thinking should be 'abc', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "abc",
+            "thinking should be 'abc', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "text", "text should be 'text', got: {:?}", text);
@@ -1186,7 +1210,11 @@ mod tests {
         all.extend(ctx.generate_final_events());
 
         let thinking = collect_thinking_content(&all);
-        assert_eq!(thinking, "hello", "thinking should be 'hello', got: {:?}", thinking);
+        assert_eq!(
+            thinking, "hello",
+            "thinking should be 'hello', got: {:?}",
+            thinking
+        );
 
         let text = collect_text_content(&all);
         assert_eq!(text, "world", "text should be 'world', got: {:?}", text);

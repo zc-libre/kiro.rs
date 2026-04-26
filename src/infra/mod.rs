@@ -2,8 +2,6 @@
 //!
 //! Phase 2 起逐步接入。Phase 1 / 2 期间老 `kiro/` 模块仍并存，Phase 7 移除。
 
-#![allow(dead_code)]
-
 pub mod endpoint;
 pub mod http;
 pub mod machine_id;

@@ -1,5 +1,6 @@
 //! HTTP Client 构建（迁移自 src/http_client.rs，TlsBackend 切到 config::net::TlsBackend）
 
+use std::fmt;
 use std::time::Duration;
 
 use reqwest::{Client, Proxy};
@@ -8,7 +9,10 @@ use crate::config::net::TlsBackend;
 use crate::domain::error::KiroError;
 
 /// 代理配置（凭据级或全局，按 ProxyConfig 维度做 Client 缓存）
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+///
+/// `Debug` 自定义实现把 `password` 脱敏为 `[REDACTED]`，避免 `{:?}` 打日志时泄露。
+/// 业务路径打印 URL 时请用 [`mask_proxy_url`] 脱敏 `proxyUrl` 中可能内嵌的凭据。
+#[derive(Clone, Default, PartialEq, Eq, Hash)]
 pub struct ProxyConfig {
     pub url: String,
     pub username: Option<String>,
@@ -29,6 +33,45 @@ impl ProxyConfig {
         self.password = Some(password.into());
         self
     }
+
+    /// 适合在日志/UI 中显示的 URL：脱敏 userinfo 部分的 password。
+    pub fn display_url(&self) -> String {
+        mask_proxy_url(&self.url)
+    }
+}
+
+impl fmt::Debug for ProxyConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProxyConfig")
+            .field("url", &mask_proxy_url(&self.url))
+            .field("username", &self.username)
+            .field(
+                "password",
+                &self.password.as_ref().map(|_| "[REDACTED]"),
+            )
+            .finish()
+    }
+}
+
+/// 把 proxy URL 中的 password 替换为 ****（保留 scheme/user/host:port）。
+///
+/// 仅识别 `<scheme>://[user:password@]host:port` 形式；无 password / 解析失败时原样返回。
+pub fn mask_proxy_url(url: &str) -> String {
+    let Some(scheme_end) = url.find("://") else {
+        return url.to_string();
+    };
+    let (scheme, rest) = url.split_at(scheme_end);
+    let after = &rest[3..];
+    let Some(at_pos) = after.find('@') else {
+        return url.to_string();
+    };
+    let userinfo = &after[..at_pos];
+    let host_port = &after[at_pos + 1..];
+    let Some(colon_pos) = userinfo.find(':') else {
+        return url.to_string();
+    };
+    let user = &userinfo[..colon_pos];
+    format!("{scheme}://{user}:****@{host_port}")
 }
 
 /// 构建 reqwest::Client
@@ -100,5 +143,32 @@ mod tests {
         let config = ProxyConfig::new("http://127.0.0.1:7890");
         let client = build_client(Some(&config), 30, TlsBackend::Rustls);
         assert!(client.is_ok());
+    }
+
+    #[test]
+    fn debug_redacts_password_and_masks_userinfo_in_url() {
+        let config =
+            ProxyConfig::new("http://user:secret@host:8080").with_auth("u", "very-secret");
+        let s = format!("{config:?}");
+        assert!(!s.contains("secret"), "raw secret leaked: {s}");
+        assert!(!s.contains("very-secret"), "raw with_auth pwd leaked: {s}");
+        assert!(s.contains("[REDACTED]"));
+        assert!(s.contains("user:****@host"));
+    }
+
+    #[test]
+    fn display_url_masks_inline_password() {
+        let cfg = ProxyConfig::new("http://user:pass@proxy:3128");
+        assert_eq!(cfg.display_url(), "http://user:****@proxy:3128");
+
+        let plain = ProxyConfig::new("http://proxy:3128");
+        assert_eq!(plain.display_url(), "http://proxy:3128");
+    }
+
+    #[test]
+    fn mask_proxy_url_handles_edge_cases() {
+        assert_eq!(mask_proxy_url("not-a-url"), "not-a-url");
+        assert_eq!(mask_proxy_url(""), "");
+        assert_eq!(mask_proxy_url("http://user@host"), "http://user@host");
     }
 }
