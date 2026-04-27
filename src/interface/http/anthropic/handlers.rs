@@ -31,6 +31,7 @@ use crate::interface::http::error::kiro_error_response;
 use crate::service::conversation::converter::{ConversionError, convert_request};
 use crate::service::conversation::delivery::DeliveryMode;
 use crate::service::conversation::delivery::{BufferedStreamContext, StreamContext};
+use crate::service::conversation::error::{FatalKiroError, is_fatal_exception};
 use crate::service::conversation::reducer::SseEvent;
 use crate::service::conversation::websearch;
 
@@ -275,6 +276,52 @@ fn create_ping_sse() -> Bytes {
     Bytes::from("event: ping\ndata: {\"type\": \"ping\"}\n\n")
 }
 
+/// 创建 Anthropic 标准 `event: error` SSE 字节，用于 fail-fast 终止流。
+///
+/// 输出格式与 Anthropic streaming 规范一致：
+/// `event: error\ndata: {"type":"error","error":{"type":"<error_type>","message":"<message>"}}\n\n`
+fn create_error_sse(error_type: &str, message: &str) -> Bytes {
+    let payload = json!({
+        "type": "error",
+        "error": { "type": error_type, "message": message }
+    });
+    Bytes::from(format!(
+        "event: error\ndata: {}\n\n",
+        serde_json::to_string(&payload).expect("serialize SSE error literal cannot fail")
+    ))
+}
+
+/// 把已收集的合法 SSE 事件转字节，并在末尾追加一条 fatal `event: error`。
+///
+/// 用于 live 模式 fail-fast：此时之前已 flush 的事件无法撤回，仅追加 error 通知客户端，
+/// 不再发 `final_events` / `message_stop`——流的内容完整性已不可信。
+fn flush_events_with_error(
+    events: Vec<SseEvent>,
+    err: &FatalKiroError,
+) -> Vec<Result<Bytes, Infallible>> {
+    let mut bytes: Vec<Result<Bytes, Infallible>> = events
+        .into_iter()
+        .map(|e| Ok(Bytes::from(e.to_sse_string())))
+        .collect();
+    bytes.push(Ok(create_error_sse(
+        err.anthropic_error_type(),
+        &err.client_message(),
+    )));
+    bytes
+}
+
+/// 将 [`FatalKiroError`] 映射为非流式 HTTP 错误响应（502 + Anthropic ErrorResponse JSON）。
+fn fatal_to_response(err: &FatalKiroError) -> Response {
+    (
+        err.http_status(),
+        Json(ErrorResponse::new(
+            err.anthropic_error_type(),
+            err.client_message(),
+        )),
+    )
+        .into_response()
+}
+
 /// 创建 SSE 事件流
 fn create_sse_stream(
     response: reqwest::Response,
@@ -304,24 +351,39 @@ fn create_sse_stream(
                 chunk_result = body_stream.next() => {
                     match chunk_result {
                         Some(Ok(chunk)) => {
-                            // 解码事件
+                            // feed 失败 = 缓冲区溢出，fail-fast
                             if let Err(e) = decoder.feed(&chunk) {
-                                tracing::warn!("缓冲区溢出: {}", e);
+                                let err = FatalKiroError::BufferOverflow(e.to_string());
+                                tracing::error!(kind = err.kind(), mode = "live", error = %err, "SSE 流终止");
+                                let bytes = flush_events_with_error(Vec::new(), &err);
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
                             }
 
                             let mut events = Vec::new();
+                            let mut fatal: Option<FatalKiroError> = None;
                             for result in decoder.decode_iter() {
                                 match result {
-                                    Ok(frame) => {
-                                        if let Ok(event) = Event::from_frame(frame) {
-                                            let sse_events = ctx.process_kiro_event(&event);
-                                            events.extend(sse_events);
+                                    Ok(frame) => match Event::from_frame(frame) {
+                                        Ok(event) => match ctx.process_kiro_event(&event) {
+                                            Ok(sse_events) => events.extend(sse_events),
+                                            Err(e) => { fatal = Some(e); break; }
+                                        },
+                                        Err(e) => {
+                                            fatal = Some(FatalKiroError::EventParseFailed(e.to_string()));
+                                            break;
                                         }
-                                    }
+                                    },
                                     Err(e) => {
-                                        tracing::warn!("解码事件失败: {}", e);
+                                        fatal = Some(FatalKiroError::DecodeFailed(e.to_string()));
+                                        break;
                                     }
                                 }
+                            }
+
+                            if let Some(err) = fatal {
+                                tracing::error!(kind = err.kind(), mode = "live", error = %err, "SSE 流终止");
+                                let bytes = flush_events_with_error(events, &err);
+                                return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
                             }
 
                             // 转换为 SSE 字节流
@@ -333,17 +395,14 @@ fn create_sse_stream(
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, false, ping_interval)))
                         }
                         Some(Err(e)) => {
-                            tracing::error!("读取响应流失败: {}", e);
-                            // 发送最终事件并结束
-                            let final_events = ctx.generate_final_events();
-                            let bytes: Vec<Result<Bytes, Infallible>> = final_events
-                                .into_iter()
-                                .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                .collect();
+                            // 上游字节流读取失败：fail-fast，不再补 final_events 伪装正常结束
+                            let err = FatalKiroError::UpstreamBodyRead(e.to_string());
+                            tracing::error!(kind = err.kind(), mode = "live", error = %err, "SSE 流终止");
+                            let bytes = flush_events_with_error(Vec::new(), &err);
                             Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)))
                         }
                         None => {
-                            // 流结束，发送最终事件
+                            // 流正常结束，发送最终事件
                             let final_events = ctx.generate_final_events();
                             let bytes: Vec<Result<Bytes, Infallible>> = final_events
                                 .into_iter()
@@ -388,22 +447,18 @@ async fn handle_non_stream_request(
     let body_bytes = match response.bytes().await {
         Ok(bytes) => bytes,
         Err(e) => {
-            tracing::error!("读取响应体失败: {}", e);
-            return (
-                StatusCode::BAD_GATEWAY,
-                Json(ErrorResponse::new(
-                    "api_error",
-                    format!("读取响应失败: {}", e),
-                )),
-            )
-                .into_response();
+            let err = FatalKiroError::UpstreamBodyRead(e.to_string());
+            tracing::error!(kind = err.kind(), mode = "non_stream", error = %err, "非流式响应失败");
+            return fatal_to_response(&err);
         }
     };
 
     // 解析事件流
     let mut decoder = EventStreamDecoder::new();
     if let Err(e) = decoder.feed(&body_bytes) {
-        tracing::warn!("缓冲区溢出: {}", e);
+        let err = FatalKiroError::BufferOverflow(e.to_string());
+        tracing::error!(kind = err.kind(), mode = "non_stream", error = %err, "非流式响应失败");
+        return fatal_to_response(&err);
     }
 
     let mut text_content = String::new();
@@ -418,79 +473,106 @@ async fn handle_non_stream_request(
         std::collections::HashMap::new();
 
     for result in decoder.decode_iter() {
-        match result {
-            Ok(frame) => {
-                if let Ok(event) = Event::from_frame(frame) {
-                    match event {
-                        Event::AssistantResponse(resp) => {
-                            text_content.push_str(&resp.content);
-                        }
-                        Event::ToolUse(tool_use) => {
-                            has_tool_use = true;
+        let frame = match result {
+            Ok(frame) => frame,
+            Err(e) => {
+                let err = FatalKiroError::DecodeFailed(e.to_string());
+                tracing::error!(kind = err.kind(), mode = "non_stream", error = %err, "非流式响应失败");
+                return fatal_to_response(&err);
+            }
+        };
+        let event = match Event::from_frame(frame) {
+            Ok(event) => event,
+            Err(e) => {
+                let err = FatalKiroError::EventParseFailed(e.to_string());
+                tracing::error!(kind = err.kind(), mode = "non_stream", error = %err, "非流式响应失败");
+                return fatal_to_response(&err);
+            }
+        };
+        match event {
+            Event::AssistantResponse(resp) => {
+                text_content.push_str(&resp.content);
+            }
+            Event::ToolUse(tool_use) => {
+                has_tool_use = true;
 
-                            // 累积工具的 JSON 输入
-                            let buffer = tool_json_buffers
-                                .entry(tool_use.tool_use_id.clone())
-                                .or_default();
-                            buffer.push_str(&tool_use.input);
+                // 累积工具的 JSON 输入
+                let buffer = tool_json_buffers
+                    .entry(tool_use.tool_use_id.clone())
+                    .or_default();
+                buffer.push_str(&tool_use.input);
 
-                            // 如果是完整的工具调用，添加到列表
-                            if tool_use.stop {
-                                let input: serde_json::Value = if buffer.is_empty() {
-                                    serde_json::json!({})
-                                } else {
-                                    serde_json::from_str(buffer).unwrap_or_else(|e| {
-                                        tracing::warn!(
-                                            "工具输入 JSON 解析失败: {}, tool_use_id: {}",
-                                            e,
-                                            tool_use.tool_use_id
-                                        );
-                                        serde_json::json!({})
-                                    })
-                                };
-
-                                let original_name = tool_name_map
-                                    .get(&tool_use.name)
-                                    .cloned()
-                                    .unwrap_or_else(|| tool_use.name.clone());
-
-                                tool_uses.push(json!({
-                                    "type": "tool_use",
-                                    "id": tool_use.tool_use_id,
-                                    "name": original_name,
-                                    "input": input
-                                }));
-                            }
-                        }
-                        Event::ContextUsage(context_usage) => {
-                            // 从上下文使用百分比计算实际的 input_tokens
-                            let window_size = get_context_window_size(model);
-                            let actual_input_tokens =
-                                (context_usage.context_usage_percentage * (window_size as f64)
-                                    / 100.0) as i32;
-                            context_input_tokens = Some(actual_input_tokens);
-                            // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
-                            if context_usage.context_usage_percentage >= 100.0 {
-                                stop_reason = "model_context_window_exceeded".to_string();
-                            }
-                            tracing::debug!(
-                                "收到 contextUsageEvent: {}%, 计算 input_tokens: {}",
-                                context_usage.context_usage_percentage,
-                                actual_input_tokens
+                // 如果是完整的工具调用，添加到列表
+                if tool_use.stop {
+                    let input: serde_json::Value = if buffer.is_empty() {
+                        serde_json::json!({})
+                    } else {
+                        serde_json::from_str(buffer).unwrap_or_else(|e| {
+                            tracing::warn!(
+                                "工具输入 JSON 解析失败: {}, tool_use_id: {}",
+                                e,
+                                tool_use.tool_use_id
                             );
-                        }
-                        Event::Exception { exception_type, .. } => {
-                            if exception_type == "ContentLengthExceededException" {
-                                stop_reason = "max_tokens".to_string();
-                            }
-                        }
-                        _ => {}
-                    }
+                            serde_json::json!({})
+                        })
+                    };
+
+                    let original_name = tool_name_map
+                        .get(&tool_use.name)
+                        .cloned()
+                        .unwrap_or_else(|| tool_use.name.clone());
+
+                    tool_uses.push(json!({
+                        "type": "tool_use",
+                        "id": tool_use.tool_use_id,
+                        "name": original_name,
+                        "input": input
+                    }));
                 }
             }
-            Err(e) => {
-                tracing::warn!("解码事件失败: {}", e);
+            Event::ContextUsage(context_usage) => {
+                // 从上下文使用百分比计算实际的 input_tokens
+                let window_size = get_context_window_size(model);
+                let actual_input_tokens = (context_usage.context_usage_percentage
+                    * (window_size as f64)
+                    / 100.0) as i32;
+                context_input_tokens = Some(actual_input_tokens);
+                // 上下文使用量达到 100% 时，设置 stop_reason 为 model_context_window_exceeded
+                if context_usage.context_usage_percentage >= 100.0 {
+                    stop_reason = "model_context_window_exceeded".to_string();
+                }
+                tracing::debug!(
+                    "收到 contextUsageEvent: {}%, 计算 input_tokens: {}",
+                    context_usage.context_usage_percentage,
+                    actual_input_tokens
+                );
             }
+            Event::Exception {
+                exception_type,
+                message,
+            } => {
+                if is_fatal_exception(&exception_type) {
+                    let err = FatalKiroError::UpstreamException {
+                        exception_type,
+                        message,
+                    };
+                    tracing::error!(kind = err.kind(), mode = "non_stream", error = %err, "非流式响应失败");
+                    return fatal_to_response(&err);
+                }
+                stop_reason = "max_tokens".to_string();
+            }
+            Event::Error {
+                error_code,
+                error_message,
+            } => {
+                let err = FatalKiroError::UpstreamError {
+                    error_code,
+                    error_message,
+                };
+                tracing::error!(kind = err.kind(), mode = "non_stream", error = %err, "非流式响应失败");
+                return fatal_to_response(&err);
+            }
+            _ => {}
         }
     }
 
@@ -652,34 +734,58 @@ fn create_buffered_sse_stream(
                     chunk_result = body_stream.next() => {
                         match chunk_result {
                             Some(Ok(chunk)) => {
-                                // 解码事件
+                                // feed 失败 = 缓冲区溢出，fail-fast
                                 if let Err(e) = decoder.feed(&chunk) {
-                                    tracing::warn!("缓冲区溢出: {}", e);
+                                    let err = FatalKiroError::BufferOverflow(e.to_string());
+                                    tracing::error!(kind = err.kind(), mode = "buffered", error = %err, "SSE 流终止");
+                                    let bytes = vec![Ok(create_error_sse(
+                                        err.anthropic_error_type(),
+                                        &err.client_message(),
+                                    ))];
+                                    return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
                                 }
 
+                                let mut fatal: Option<FatalKiroError> = None;
                                 for result in decoder.decode_iter() {
                                     match result {
-                                        Ok(frame) => {
-                                            if let Ok(event) = Event::from_frame(frame) {
-                                                // 缓冲事件（复用 StreamContext 的处理逻辑）
-                                                ctx.process_and_buffer(&event);
+                                        Ok(frame) => match Event::from_frame(frame) {
+                                            Ok(event) => {
+                                                if let Err(e) = ctx.process_and_buffer(&event) {
+                                                    fatal = Some(e);
+                                                    break;
+                                                }
                                             }
-                                        }
+                                            Err(e) => {
+                                                fatal = Some(FatalKiroError::EventParseFailed(e.to_string()));
+                                                break;
+                                            }
+                                        },
                                         Err(e) => {
-                                            tracing::warn!("解码事件失败: {}", e);
+                                            fatal = Some(FatalKiroError::DecodeFailed(e.to_string()));
+                                            break;
                                         }
                                     }
+                                }
+
+                                if let Some(err) = fatal {
+                                    // buffered 模式下尚未 flush 任何事件给客户端，直接丢弃 buffer，
+                                    // 只发一条 event: error，避免给客户端"开了头但没收尾"的不完整结构。
+                                    tracing::error!(kind = err.kind(), mode = "buffered", error = %err, "SSE 流终止");
+                                    let bytes = vec![Ok(create_error_sse(
+                                        err.anthropic_error_type(),
+                                        &err.client_message(),
+                                    ))];
+                                    return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
                                 }
                                 // 继续读取下一个 chunk，不发送任何数据
                             }
                             Some(Err(e)) => {
-                                tracing::error!("读取响应流失败: {}", e);
-                                // 发生错误，完成处理并返回所有事件
-                                let all_events = ctx.finish_and_get_all_events();
-                                let bytes: Vec<Result<Bytes, Infallible>> = all_events
-                                    .into_iter()
-                                    .map(|e| Ok(Bytes::from(e.to_sse_string())))
-                                    .collect();
+                                let err = FatalKiroError::UpstreamBodyRead(e.to_string());
+                                tracing::error!(kind = err.kind(), mode = "buffered", error = %err, "SSE 流终止");
+                                let bytes = vec![Ok(create_error_sse(
+                                    err.anthropic_error_type(),
+                                    &err.client_message(),
+                                ))];
                                 return Some((stream::iter(bytes), (body_stream, ctx, decoder, true, ping_interval)));
                             }
                             None => {
@@ -806,5 +912,95 @@ mod tests {
     #[test]
     fn delivery_mode_dispatch_is_distinct() {
         assert_ne!(DeliveryMode::Live, DeliveryMode::Buffered);
+    }
+
+    fn bytes_to_strings(b: Vec<Result<Bytes, Infallible>>) -> Vec<String> {
+        b.into_iter()
+            .map(|r| String::from_utf8(r.unwrap().to_vec()).unwrap())
+            .collect()
+    }
+
+    /// Live fail-fast：已收集的合法事件按原顺序出现，末尾追加一条 event: error，
+    /// 且**绝不**出现 message_stop——流的内容完整性已不可信，不能伪装正常结束。
+    #[test]
+    fn flush_events_with_error_appends_error_and_never_emits_message_stop() {
+        let events = vec![
+            SseEvent::new(
+                "message_start",
+                json!({"type": "message_start", "message": {"id": "msg_x"}}),
+            ),
+            SseEvent::new(
+                "content_block_delta",
+                json!({"type": "content_block_delta", "index": 0,
+                    "delta": {"type": "text_delta", "text": "hi"}}),
+            ),
+        ];
+        let err = FatalKiroError::UpstreamError {
+            error_code: "RateLimited".into(),
+            error_message: "too many requests".into(),
+        };
+
+        let lines = bytes_to_strings(flush_events_with_error(events, &err));
+        let combined = lines.concat();
+
+        assert!(combined.contains("event: message_start"));
+        assert!(combined.contains("event: content_block_delta"));
+        assert!(combined.contains("event: error"));
+        assert!(
+            !combined.contains("event: message_stop"),
+            "fatal 终止时不得再发 message_stop: {combined}"
+        );
+        // 末尾必须是 error 事件
+        let last = lines.last().unwrap();
+        assert!(
+            last.starts_with("event: error"),
+            "最后一条必须是 error: {last}"
+        );
+        // 上游 Error 的语义透传
+        assert!(combined.contains("RateLimited"));
+        assert!(combined.contains("too many requests"));
+    }
+
+    /// 本地解码错误的 client_message 应使用泛化文案，不泄漏内部细节。
+    #[test]
+    fn flush_events_with_error_redacts_local_decode_internals() {
+        let err = FatalKiroError::BufferOverflow("size 16777217 > max 16777216".into());
+        let lines = bytes_to_strings(flush_events_with_error(Vec::new(), &err));
+        let combined = lines.concat();
+        assert!(combined.contains("event: error"));
+        assert!(
+            !combined.contains("16777216"),
+            "内部细节不得暴露给客户端: {combined}"
+        );
+    }
+
+    /// `create_error_sse` 输出符合 Anthropic SSE 规范的 error 事件结构。
+    #[test]
+    fn create_error_sse_emits_anthropic_compliant_payload() {
+        let raw = create_error_sse("api_error", "boom");
+        let s = String::from_utf8(raw.to_vec()).unwrap();
+        assert!(s.starts_with("event: error\ndata: "));
+        assert!(s.ends_with("\n\n"));
+        let data_line = s
+            .lines()
+            .find_map(|l| l.strip_prefix("data: "))
+            .expect("must have data line");
+        let v: Value = serde_json::from_str(data_line).unwrap();
+        assert_eq!(v["type"], "error");
+        assert_eq!(v["error"]["type"], "api_error");
+        assert_eq!(v["error"]["message"], "boom");
+    }
+
+    /// 非流式 fatal 路径：返回 502 + Anthropic ErrorResponse JSON，**不返 200**。
+    #[tokio::test]
+    async fn fatal_to_response_returns_502_with_anthropic_error_json() {
+        let err = FatalKiroError::DecodeFailed("crc mismatch at offset 42".into());
+        let (status, json) = body_json(fatal_to_response(&err)).await;
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(json["error"]["type"], "api_error");
+        // 本地解码错误用泛化文案
+        let msg = json["error"]["message"].as_str().unwrap();
+        assert!(msg.contains("Stream decode failed"), "got: {msg}");
+        assert!(!msg.contains("offset 42"), "internal detail leaked: {msg}");
     }
 }

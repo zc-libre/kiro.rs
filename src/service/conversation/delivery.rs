@@ -14,6 +14,7 @@ use uuid::Uuid;
 use crate::domain::event::Event;
 
 use super::converter::get_context_window_size;
+use super::error::{FatalKiroError, is_fatal_exception};
 use super::reducer::{SseEvent, SseStateManager};
 use super::thinking::{
     find_char_boundary, find_real_thinking_end_tag, find_real_thinking_end_tag_at_buffer_end,
@@ -147,10 +148,17 @@ impl StreamContext {
     }
 
     /// 处理 Kiro 事件并转换为 Anthropic SSE 事件
-    pub fn process_kiro_event(&mut self, event: &Event) -> Vec<SseEvent> {
+    ///
+    /// # Errors
+    /// 上游 `Event::Error` 与非 `ContentLengthExceededException` 的 `Event::Exception`
+    /// 视为 fatal，调用方必须立即终止流并通知客户端（参见 [`FatalKiroError`]）。
+    pub fn process_kiro_event(
+        &mut self,
+        event: &Event,
+    ) -> Result<Vec<SseEvent>, FatalKiroError> {
         match event {
-            Event::AssistantResponse(resp) => self.process_assistant_response(&resp.content),
-            Event::ToolUse(tool_use) => self.process_tool_use(tool_use),
+            Event::AssistantResponse(resp) => Ok(self.process_assistant_response(&resp.content)),
+            Event::ToolUse(tool_use) => Ok(self.process_tool_use(tool_use)),
             Event::ContextUsage(context_usage) => {
                 let window_size = get_context_window_size(&self.model);
                 let actual_input_tokens =
@@ -165,26 +173,32 @@ impl StreamContext {
                     context_usage.context_usage_percentage,
                     actual_input_tokens
                 );
-                Vec::new()
+                Ok(Vec::new())
             }
             Event::Error {
                 error_code,
                 error_message,
-            } => {
-                tracing::error!("收到错误事件: {} - {}", error_code, error_message);
-                Vec::new()
-            }
+            } => Err(FatalKiroError::UpstreamError {
+                error_code: error_code.clone(),
+                error_message: error_message.clone(),
+            }),
             Event::Exception {
                 exception_type,
                 message,
             } => {
-                if exception_type == "ContentLengthExceededException" {
+                if is_fatal_exception(exception_type) {
+                    Err(FatalKiroError::UpstreamException {
+                        exception_type: exception_type.clone(),
+                        message: message.clone(),
+                    })
+                } else {
+                    // ContentLengthExceededException：正常 max_tokens 停止
                     self.state_manager.set_stop_reason("max_tokens");
+                    tracing::warn!("收到异常事件: {} - {}", exception_type, message);
+                    Ok(Vec::new())
                 }
-                tracing::warn!("收到异常事件: {} - {}", exception_type, message);
-                Vec::new()
             }
-            _ => Vec::new(),
+            _ => Ok(Vec::new()),
         }
     }
 
@@ -642,15 +656,22 @@ impl BufferedStreamContext {
     }
 
     /// 处理 Kiro 事件并缓冲结果
-    pub fn process_and_buffer(&mut self, event: &crate::domain::event::Event) {
+    ///
+    /// # Errors
+    /// 透传 [`StreamContext::process_kiro_event`] 的 fatal；上层应丢弃整个 buffer 并发 error。
+    pub fn process_and_buffer(
+        &mut self,
+        event: &crate::domain::event::Event,
+    ) -> Result<(), FatalKiroError> {
         if !self.initial_events_generated {
             let initial_events = self.inner.generate_initial_events();
             self.event_buffer.extend(initial_events);
             self.initial_events_generated = true;
         }
 
-        let events = self.inner.process_kiro_event(event);
+        let events = self.inner.process_kiro_event(event)?;
         self.event_buffer.extend(events);
+        Ok(())
     }
 
     /// 完成流处理并返回所有事件
@@ -738,7 +759,8 @@ mod tests {
         let context_event = Event::ContextUsage(ContextUsageEvent {
             context_usage_percentage: 50.0,
         });
-        ctx.process_and_buffer(&context_event);
+        ctx.process_and_buffer(&context_event)
+            .expect("ContextUsage 事件不应为 fatal");
 
         let events = ctx.finish_and_get_all_events();
         let message_start = events
@@ -776,7 +798,9 @@ mod tests {
             stop: true,
         });
 
-        let events = ctx.process_kiro_event(&tool_event);
+        let events = ctx
+            .process_kiro_event(&tool_event)
+            .expect("ToolUse 事件不应为 fatal");
 
         let start_event = events
             .iter()
@@ -1316,5 +1340,64 @@ mod tests {
             message_delta.data["delta"]["stop_reason"], "tool_use",
             "stop_reason should be tool_use when tool_use is present"
         );
+    }
+
+    #[test]
+    fn process_kiro_event_returns_fatal_for_upstream_error() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, HashMap::new());
+        let event = Event::Error {
+            error_code: "RateLimited".into(),
+            error_message: "too many requests".into(),
+        };
+        let err = ctx
+            .process_kiro_event(&event)
+            .expect_err("Event::Error 必须返回 fatal");
+        assert_eq!(err.kind(), "upstream_error");
+    }
+
+    #[test]
+    fn process_kiro_event_returns_fatal_for_non_max_tokens_exception() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, HashMap::new());
+        let event = Event::Exception {
+            exception_type: "ThrottlingException".into(),
+            message: "throttled".into(),
+        };
+        let err = ctx
+            .process_kiro_event(&event)
+            .expect_err("非 ContentLengthExceededException 的 Exception 必须返回 fatal");
+        assert_eq!(err.kind(), "upstream_exception");
+    }
+
+    #[test]
+    fn process_kiro_event_treats_content_length_exceeded_as_max_tokens() {
+        let mut ctx = StreamContext::new_with_thinking("test-model", 1, false, HashMap::new());
+        let event = Event::Exception {
+            exception_type: "ContentLengthExceededException".into(),
+            message: "too long".into(),
+        };
+        let events = ctx
+            .process_kiro_event(&event)
+            .expect("ContentLengthExceededException 是正常停止，不应 fatal");
+        assert!(events.is_empty());
+        // 触发 generate_final_events 后应能看到 stop_reason = max_tokens
+        let final_events = ctx.generate_final_events();
+        let message_delta = final_events
+            .iter()
+            .find(|e| e.event == "message_delta")
+            .expect("应包含 message_delta");
+        assert_eq!(message_delta.data["delta"]["stop_reason"], "max_tokens");
+    }
+
+    #[test]
+    fn process_and_buffer_propagates_fatal() {
+        let mut ctx = BufferedStreamContext::new("test-model", 100, false, HashMap::new());
+        let event = Event::Error {
+            error_code: "InternalError".into(),
+            error_message: "server failure".into(),
+        };
+        let err = ctx
+            .process_and_buffer(&event)
+            .expect_err("process_and_buffer 必须透传 fatal");
+        assert_eq!(err.kind(), "upstream_error");
     }
 }
