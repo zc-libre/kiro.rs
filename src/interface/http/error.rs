@@ -80,6 +80,14 @@ pub fn kiro_error_response(err: &KiroError) -> Response {
                 "Refresh token invalid".to_string(),
             )
         }
+        KiroError::Refresh(RefreshError::Network(_)) => {
+            tracing::error!(error = %err, "refresh 网络错误，上游不可达");
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "api_error",
+                "Upstream service unavailable".to_string(),
+            )
+        }
         // 默认 arm 覆盖 KiroError::{Endpoint, Network, Config, Storage, Decode} 等内部错误。
         // 内部错误的 Display 可能含文件路径 / URL 等运维信息，统一替换为 generic message，
         // 完整 error 链仅落入 tracing::error! 由运维查阅。
