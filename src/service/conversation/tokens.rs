@@ -1,9 +1,13 @@
 //! 本地 token 估算（迁移自 src/token.rs，删除 OnceLock 全局静态与远程 API 调用路径）
 //!
+//! 项目唯一的本地 token 估算函数（流式与非流式共用）。
+//! 流式路径在 [`super::delivery::StreamContext`] 中累积输出文本，最终在
+//! `generate_final_events` 阶段一次性调用 [`count_tokens`] 估算 output_tokens。
+//!
 //! # 计算规则
-//! - 非西文字符：每个计 4.5 个字符单位（实际代码：4.0）
+//! - 非西文字符：每个计 4.0 个字符单位
 //! - 西文字符：每个计 1 个字符单位
-//! - 4 个字符单位 = 1 token
+//! - 4 个字符单位 = 1 token，再乘以基于总长度的分档系数
 
 use crate::interface::http::anthropic::dto::{Message, SystemMessage, Tool};
 
@@ -21,6 +25,10 @@ fn is_non_western_char(c: char) -> bool {
 }
 
 /// 计算文本的 token 数量（同步纯函数）
+///
+/// 项目内唯一的本地估算入口。分档系数基于**整段总长度**生效，因此调用方应在
+/// 「最终一次性合并的文本」上调用本函数，而不要对单个流式 chunk 反复调用，否则
+/// 每个小 chunk 都会落入 `<100` 档（×1.5）造成系统性高估。
 pub fn count_tokens(text: &str) -> u64 {
     let char_units: f64 = text
         .chars()
@@ -78,23 +86,6 @@ pub async fn count_all_tokens(
         }
     }
 
-    total.max(1)
-}
-
-/// 估算输出 tokens
-pub fn estimate_output_tokens(content: &[serde_json::Value]) -> i32 {
-    let mut total = 0;
-    for block in content {
-        if let Some(text) = block.get("text").and_then(|v| v.as_str()) {
-            total += count_tokens(text) as i32;
-        }
-        if block.get("type").and_then(|v| v.as_str()) == Some("tool_use")
-            && let Some(input) = block.get("input")
-        {
-            let input_str = serde_json::to_string(input).unwrap_or_default();
-            total += count_tokens(&input_str) as i32;
-        }
-    }
     total.max(1)
 }
 

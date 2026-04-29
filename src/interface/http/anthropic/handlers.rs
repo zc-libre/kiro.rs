@@ -613,8 +613,18 @@ async fn handle_non_stream_request(
 
     content.extend(tool_uses);
 
-    // 估算输出 tokens
-    let output_tokens = token::estimate_output_tokens(&content);
+    // 估算输出 tokens：与流式 delivery.rs 路径对齐，基于原始 text_content
+    // （含 `<thinking>` 标签与内容）+ 所有 tool_use.input 原始片段。
+    // 不能基于上方拼装的 content blocks —— thinking block 字段名是 "thinking"
+    // 而非 "text"，按 block 统计会漏算 thinking 的 token 消耗。
+    let mut tool_input_concat = String::new();
+    for buf in tool_json_buffers.values() {
+        tool_input_concat.push_str(buf);
+        tool_input_concat.push('\n');
+    }
+    let output_tokens = (token::count_tokens(&text_content)
+        + token::count_tokens(&tool_input_concat))
+    .max(1) as i32;
 
     // 使用从 contextUsageEvent 计算的 input_tokens，如果没有则使用估算值
     let final_input_tokens = context_input_tokens.unwrap_or(input_tokens);

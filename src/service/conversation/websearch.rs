@@ -16,6 +16,7 @@ use serde_json::json;
 use uuid::Uuid;
 
 use super::reducer::SseEvent;
+use super::tokens::count_tokens;
 use crate::domain::error::ProviderError;
 use crate::interface::http::anthropic::dto::{ErrorResponse, MessagesRequest};
 
@@ -413,7 +414,7 @@ fn generate_websearch_events(
 
     // 10. message_delta
     // 官方 API 的 message_delta.delta 中没有 stop_sequence 字段
-    let output_tokens = (summary.len() as i32 + 3) / 4; // 简单估算
+    let output_tokens = count_tokens(&summary).max(1) as i32;
     events.push(SseEvent::new(
         "message_delta",
         json!({

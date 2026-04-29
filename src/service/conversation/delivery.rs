@@ -20,6 +20,7 @@ use super::thinking::{
     find_char_boundary, find_real_thinking_end_tag, find_real_thinking_end_tag_at_buffer_end,
     find_real_thinking_start_tag,
 };
+use super::tokens::count_tokens;
 
 /// SseDelivery 策略类型枚举（与 handler 参数化匹配）
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -42,8 +43,10 @@ pub struct StreamContext {
     pub input_tokens: i32,
     /// 从 contextUsageEvent 计算的实际输入 tokens
     pub context_input_tokens: Option<i32>,
-    /// 输出 tokens 累计
-    pub output_tokens: i32,
+    /// 累计的 assistant 原始文本（含 thinking 标签与内容），末段统一估算 output_tokens 用
+    output_text_buffer: String,
+    /// 累计的 tool_use.input 片段（JSON），末段统一估算 output_tokens 用
+    tool_input_buffer: String,
     /// 工具块索引映射 (tool_id -> block_index)
     pub tool_block_indices: HashMap<String, i32>,
     /// 工具名称反向映射（短名称 → 原始名称），用于响应时还原
@@ -79,7 +82,8 @@ impl StreamContext {
             message_id: format!("msg_{}", Uuid::new_v4().to_string().replace('-', "")),
             input_tokens,
             context_input_tokens: None,
-            output_tokens: 0,
+            output_text_buffer: String::new(),
+            tool_input_buffer: String::new(),
             tool_block_indices: HashMap::new(),
             tool_name_map,
             thinking_enabled,
@@ -207,7 +211,9 @@ impl StreamContext {
             return Vec::new();
         }
 
-        self.output_tokens += estimate_tokens(content);
+        // 累积原始 chunk（含 `<thinking>` 标签字符），由 generate_final_events 统一估算。
+        // 标签字符仅占数 token，可忽略。
+        self.output_text_buffer.push_str(content);
 
         if self.thinking_enabled {
             return self.process_content_with_thinking(content);
@@ -506,7 +512,8 @@ impl StreamContext {
 
         // 发送参数增量 (ToolUseEvent.input 是 String 类型)
         if !tool_use.input.is_empty() {
-            self.output_tokens += (tool_use.input.len() as i32 + 3) / 4;
+            self.tool_input_buffer.push_str(&tool_use.input);
+            self.tool_input_buffer.push('\n');
 
             if let Some(delta_event) = self.state_manager.handle_content_block_delta(
                 block_index,
@@ -603,10 +610,15 @@ impl StreamContext {
         }
 
         let final_input_tokens = self.context_input_tokens.unwrap_or(self.input_tokens);
+        // 末段统一估算：text 与 tool_input 字符分布差异较大，分别估算后相加，
+        // 避免 count_tokens 的分档曲线在合并时被错误激活。
+        let output_tokens = (count_tokens(&self.output_text_buffer)
+            + count_tokens(&self.tool_input_buffer))
+        .max(1) as i32;
 
         events.extend(
             self.state_manager
-                .generate_final_events(final_input_tokens, self.output_tokens),
+                .generate_final_events(final_input_tokens, output_tokens),
         );
         events
     }
@@ -706,28 +718,6 @@ impl BufferedStreamContext {
 
         std::mem::take(&mut self.event_buffer)
     }
-}
-
-/// 简单的 token 估算
-///
-/// 中文字符按 ~1.5 char/token、其他按 ~4 char/token 估算。
-fn estimate_tokens(text: &str) -> i32 {
-    let chars: Vec<char> = text.chars().collect();
-    let mut chinese_count = 0;
-    let mut other_count = 0;
-
-    for c in &chars {
-        if *c >= '\u{4E00}' && *c <= '\u{9FFF}' {
-            chinese_count += 1;
-        } else {
-            other_count += 1;
-        }
-    }
-
-    let chinese_tokens = (chinese_count * 2 + 2) / 3;
-    let other_tokens = (other_count + 3) / 4;
-
-    (chinese_tokens + other_tokens).max(1)
 }
 
 #[cfg(test)]
@@ -942,13 +932,6 @@ mod tests {
             }),
             "flushed text should equal the buffered prefix"
         );
-    }
-
-    #[test]
-    fn test_estimate_tokens() {
-        assert!(estimate_tokens("Hello") > 0);
-        assert!(estimate_tokens("你好") > 0);
-        assert!(estimate_tokens("Hello 你好") > 0);
     }
 
     #[test]
