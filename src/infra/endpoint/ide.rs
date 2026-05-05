@@ -3,7 +3,6 @@
 //! - API: `https://q.{api_region}.amazonaws.com/generateAssistantResponse`
 //! - MCP: `https://q.{api_region}.amazonaws.com/mcp`
 
-use reqwest::RequestBuilder;
 use uuid::Uuid;
 
 use crate::domain::endpoint::{KiroEndpoint, RequestContext};
@@ -65,39 +64,39 @@ impl KiroEndpoint for IdeEndpoint {
         format!("https://q.{}.amazonaws.com/mcp", self.api_region(ctx))
     }
 
-    fn decorate_api(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder {
-        let mut req = req
-            .header("x-amzn-codewhisperer-optout", "true")
-            .header("x-amzn-kiro-agent-mode", "vibe")
-            .header("x-amz-user-agent", self.x_amz_user_agent(ctx))
-            .header("user-agent", self.user_agent(ctx))
-            .header("host", self.host(ctx))
-            .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
-            .header("amz-sdk-request", "attempt=1; max=3")
-            .header("Authorization", format!("Bearer {}", ctx.token));
-
+    fn api_headers(&self, ctx: &RequestContext<'_>) -> Vec<(String, String)> {
+        let mut h = vec![
+            ("x-amzn-codewhisperer-optout".into(), "true".into()),
+            ("x-amzn-kiro-agent-mode".into(), "vibe".into()),
+            ("x-amz-user-agent".into(), self.x_amz_user_agent(ctx)),
+            ("user-agent".into(), self.user_agent(ctx)),
+            ("host".into(), self.host(ctx)),
+            ("amz-sdk-invocation-id".into(), Uuid::new_v4().to_string()),
+            ("amz-sdk-request".into(), "attempt=1; max=3".into()),
+            ("Authorization".into(), format!("Bearer {}", ctx.token)),
+        ];
         if ctx.credentials.is_api_key_credential() {
-            req = req.header("tokentype", "API_KEY");
+            h.push(("tokentype".into(), "API_KEY".into()));
         }
-        req
+        h
     }
 
-    fn decorate_mcp(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder {
-        let mut req = req
-            .header("x-amz-user-agent", self.x_amz_user_agent(ctx))
-            .header("user-agent", self.user_agent(ctx))
-            .header("host", self.host(ctx))
-            .header("amz-sdk-invocation-id", Uuid::new_v4().to_string())
-            .header("amz-sdk-request", "attempt=1; max=3")
-            .header("Authorization", format!("Bearer {}", ctx.token));
-
+    fn mcp_headers(&self, ctx: &RequestContext<'_>) -> Vec<(String, String)> {
+        let mut h = vec![
+            ("x-amz-user-agent".into(), self.x_amz_user_agent(ctx)),
+            ("user-agent".into(), self.user_agent(ctx)),
+            ("host".into(), self.host(ctx)),
+            ("amz-sdk-invocation-id".into(), Uuid::new_v4().to_string()),
+            ("amz-sdk-request".into(), "attempt=1; max=3".into()),
+            ("Authorization".into(), format!("Bearer {}", ctx.token)),
+        ];
         if let Some(ref arn) = ctx.credentials.profile_arn {
-            req = req.header("x-amzn-kiro-profile-arn", arn);
+            h.push(("x-amzn-kiro-profile-arn".into(), arn.clone()));
         }
         if ctx.credentials.is_api_key_credential() {
-            req = req.header("tokentype", "API_KEY");
+            h.push(("tokentype".into(), "API_KEY".into()));
         }
-        req
+        h
     }
 
     fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> String {

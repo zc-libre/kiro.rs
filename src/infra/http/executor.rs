@@ -174,10 +174,13 @@ impl RequestExecutor {
                 .body(body_t)
                 .header("content-type", "application/json")
                 .header("Connection", "close");
-            let request = match kind {
-                EndpointKind::Api => endpoint.decorate_api(base, &rctx),
-                EndpointKind::Mcp => endpoint.decorate_mcp(base, &rctx),
+            let headers = match kind {
+                EndpointKind::Api => endpoint.api_headers(&rctx),
+                EndpointKind::Mcp => endpoint.mcp_headers(&rctx),
             };
+            let request = headers
+                .into_iter()
+                .fold(base, |req, (k, v)| req.header(k, v));
 
             let response = match request.send().await {
                 Ok(r) => r,

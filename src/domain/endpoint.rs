@@ -3,8 +3,6 @@
 //! 不同 Kiro 端点（如 `ide` / `cli`）在 URL、请求头、请求体上存在差异，
 //! 但共享凭据池、Token 刷新、重试逻辑和 AWS event-stream 响应解码。
 
-use reqwest::RequestBuilder;
-
 use crate::config::Config;
 use crate::domain::credential::Credential;
 
@@ -24,8 +22,8 @@ pub trait KiroEndpoint: Send + Sync {
     fn name(&self) -> &'static str;
     fn api_url(&self, ctx: &RequestContext<'_>) -> String;
     fn mcp_url(&self, ctx: &RequestContext<'_>) -> String;
-    fn decorate_api(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder;
-    fn decorate_mcp(&self, req: RequestBuilder, ctx: &RequestContext<'_>) -> RequestBuilder;
+    fn api_headers(&self, ctx: &RequestContext<'_>) -> Vec<(String, String)>;
+    fn mcp_headers(&self, ctx: &RequestContext<'_>) -> Vec<(String, String)>;
     fn transform_api_body(&self, body: &str, ctx: &RequestContext<'_>) -> String;
     fn transform_mcp_body(&self, body: &str, _ctx: &RequestContext<'_>) -> String {
         body.to_string()
