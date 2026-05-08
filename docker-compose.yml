@@ -1,13 +1,26 @@
 services:
   kiro-rs:
-    # 使用国内镜像
-    # image: ghcr.nju.edu.cn/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
-    image: ghcr.io/${IMAGE_OWNER:-hank9999}/kiro-rs:${IMAGE_TAG:-latest}
+    build: .
     container_name: kiro-rs
     extra_hosts:
       - "host.docker.internal:host-gateway"
     ports:
-      - "8990:8990"
+      - "15369:8990"
     volumes:
       - ./config/:/app/config/
+    environment:
+      - RUST_LOG=info
+      - HTTP_PROXY=http://mihomo:7890
+      - HTTPS_PROXY=http://mihomo:7890
+      - ALL_PROXY=socks5h://mihomo:7890
+      - NO_PROXY=localhost,127.0.0.1,::1,mihomo
+    networks:
+      - proxy-net
+      - api-bridge-network
     restart: unless-stopped
+
+networks:
+  api-bridge-network:
+    external: true
+  proxy-net:
+    external: true
